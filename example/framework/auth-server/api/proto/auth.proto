@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package auth;
+
+option go_package = "gly-hub/go-dandelion/quickgo/example/framework/auth-server/api/proto/gen;auth";
+
+// AuthService 认证服务
+service AuthService {
+  // Login 用户登录
+  rpc Login (LoginRequest) returns (LoginResponse);
+  
+  // VerifyToken 验证令牌
+  rpc VerifyToken (VerifyTokenRequest) returns (VerifyTokenResponse);
+  
+  // RefreshToken 刷新令牌
+  rpc RefreshToken (RefreshTokenRequest) returns (RefreshTokenResponse);
+  
+  // GetUserInfo 获取用户信息
+  rpc GetUserInfo (GetUserInfoRequest) returns (GetUserInfoResponse);
+}
+
+// LoginRequest 登录请求
+message LoginRequest {
+  string username = 1;  // 用户名
+  string password = 2;  // 密码
+}
+
+// LoginResponse 登录响应
+message LoginResponse {
+  int32 code = 1;           // 响应码
+  string message = 2;        // 响应消息
+  string token = 3;         // 访问令牌
+  string refresh_token = 4;  // 刷新令牌
+  int64 expires_in = 5;     // 过期时间（秒）
+  UserInfo user_info = 6;   // 用户信息
+}
+
+// VerifyTokenRequest 验证令牌请求
+message VerifyTokenRequest {
+  string token = 1;  // 令牌
+}
+
+// VerifyTokenResponse 验证令牌响应
+message VerifyTokenResponse {
+  int32 code = 1;        // 响应码
+  string message = 2;     // 响应消息
+  bool valid = 3;         // 是否有效
+  UserInfo user_info = 4; // 用户信息（如果有效）
+}
+
+// RefreshTokenRequest 刷新令牌请求
+message RefreshTokenRequest {
+  string refresh_token = 1;  // 刷新令牌
+}
+
+// RefreshTokenResponse 刷新令牌响应
+message RefreshTokenResponse {
+  int32 code = 1;           // 响应码
+  string message = 2;        // 响应消息
+  string token = 3;         // 新的访问令牌
+  string refresh_token = 4; // 新的刷新令牌
+  int64 expires_in = 5;     // 过期时间（秒）
+}
+
+// GetUserInfoRequest 获取用户信息请求
+message GetUserInfoRequest {
+  string user_id = 1;  // 用户ID
+}
+
+// GetUserInfoResponse 获取用户信息响应
+message GetUserInfoResponse {
+  int32 code = 1;        // 响应码
+  string message = 2;     // 响应消息
+  UserInfo user_info = 3; // 用户信息
+}
+
+// UserInfo 用户信息
+message UserInfo {
+  string user_id = 1;    // 用户ID
+  string username = 2;   // 用户名
+  string email = 3;      // 邮箱
+  string nickname = 4;   // 昵称
+  string avatar = 5;     // 头像
+  repeated string roles = 6;  // 角色列表
+}
+
