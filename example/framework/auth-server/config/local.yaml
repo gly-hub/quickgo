@@ -1,0 +1,25 @@
+app:
+  name: "auth-server"
+  version: "1.0.0"
+  env: "local"
+
+logger:
+  enabled: true
+  level: "debug"
+  output: "console"
+  service: "auth-server"
+  version: "1.0.0"
+
+grpcServer:
+  serviceName: "auth-service"
+  address: "0.0.0.0"
+  port: 50051
+  keepAliveTime: "10s"
+  keepAliveTimeout: "3s"
+  etcd:
+    endpoints:
+      - "127.0.0.1:2379"
+    dial_timeout: "5s"
+    prefix: "/grpc/services"
+    ttl: 30
+
