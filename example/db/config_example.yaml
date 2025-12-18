@@ -1,0 +1,148 @@
+# 数据库配置示例
+
+app:
+  name: "db-example"
+  version: "1.0.0"
+  env: "local"
+
+logger:
+  enabled: true
+  level: "info"
+  output: "console"
+  service: "db-example"
+  version: "1.0.0"
+
+# GORM 配置（支持多个数据库实例）
+gorm:
+  databases:
+    # 用户数据库（支持主从配置）
+    - name: "user-db"
+      master:
+        type: "mysql"
+        host: "127.0.0.1"
+        port: 3306
+        user: "root"
+        password: "password"
+        database: "user_db"
+        charset: "utf8mb4"
+        timezone: "Local"
+      # 从库配置（用于读操作，支持多个从库）
+      slaves:
+        - host: "127.0.0.1"
+          port: 3307
+          user: "root"
+          password: "password"
+          database: "user_db"
+          charset: "utf8mb4"
+          timezone: "Local"
+        - host: "127.0.0.1"
+          port: 3308
+          user: "root"
+          password: "password"
+          database: "user_db"
+          charset: "utf8mb4"
+          timezone: "Local"
+      maxIdleConn: 10
+      maxOpenConn: 100
+      connMaxLifetime: "30m"
+      connMaxIdleTime: "10m"
+      enableLog: true
+      logLevel: "info"
+      slowThreshold: 200  # 毫秒
+
+    # 订单数据库（单个实例）
+    - name: "order-db"
+      master:
+        type: "mysql"
+        host: "127.0.0.1"
+        port: 3306
+        user: "root"
+        password: "password"
+        database: "order_db"
+        charset: "utf8mb4"
+        timezone: "Local"
+      maxIdleConn: 10
+      maxOpenConn: 100
+      enableLog: true
+      logLevel: "info"
+
+    # 产品数据库（PostgreSQL）
+    - name: "product-db"
+      master:
+        type: "postgres"
+        host: "127.0.0.1"
+        port: 5432
+        user: "postgres"
+        password: "password"
+        database: "product_db"
+        sslMode: "disable"
+      maxIdleConn: 10
+      maxOpenConn: 50
+      enableLog: true
+      logLevel: "info"
+
+# MongoDB 配置（支持多个数据库实例）
+mongodb:
+  databases:
+    # 主数据库
+    - name: "main-mongo"
+      host: "127.0.0.1"
+      port: 27017
+      username: ""
+      password: ""
+      database: "main_db"
+      authSource: "admin"
+      maxPoolSize: 100
+      minPoolSize: 10
+      maxConnIdleTime: "30m"
+      connectTimeout: "10s"
+      socketTimeout: "30s"
+
+    # 日志数据库
+    - name: "log-mongo"
+      host: "127.0.0.1"
+      port: 27017
+      username: ""
+      password: ""
+      database: "log_db"
+      maxPoolSize: 50
+      minPoolSize: 5
+
+# Redis 配置（支持多个数据库实例）
+redis:
+  databases:
+    # 缓存 Redis
+    - name: "cache-redis"
+      host: "127.0.0.1"
+      port: 6379
+      password: ""
+      db: 0
+      username: ""
+      poolSize: 10
+      minIdleConns: 5
+      maxConnAge: "1h"
+      poolTimeout: "4s"
+      idleTimeout: "5m"
+      dialTimeout: "5s"
+      readTimeout: "3s"
+      writeTimeout: "3s"
+      tls: false
+
+    # 会话 Redis
+    - name: "session-redis"
+      host: "127.0.0.1"
+      port: 6379
+      password: ""
+      db: 1
+      poolSize: 10
+      minIdleConns: 5
+
+httpServer:
+  enabled: true
+  address: "0.0.0.0"
+  port: 8080
+  enableCORS: true
+  enableRecovery: true
+  enableLogging: true
+  enableTrace: true
+

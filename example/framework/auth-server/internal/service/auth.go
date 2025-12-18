@@ -4,17 +4,27 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"time"
 
+	"gly-hub/go-dandelion/quickgo/db/redis"
 	gen "gly-hub/go-dandelion/quickgo/example/framework/auth-server/api/proto/gen/api/proto"
+	"gly-hub/go-dandelion/quickgo/example/framework/auth-server/internal/model"
 	"gly-hub/go-dandelion/quickgo/logger"
+
+	gormDB "gorm.io/gorm"
 )
 
 // AuthService 认证服务实现
 type AuthService struct {
-	// 模拟用户数据库
+	// GORM 数据库连接（可选）
+	db *gormDB.DB
+	// Redis 客户端（可选，用于 token 缓存）
+	redis *redis.Client
+	// 模拟用户数据库（如果未配置数据库，使用内存存储）
 	users map[string]*User
-	// 模拟令牌存储
+	// 模拟令牌存储（如果未配置 Redis，使用内存存储）
 	tokens map[string]*TokenInfo
 }
 
@@ -37,8 +47,10 @@ type TokenInfo struct {
 }
 
 // NewAuthService 创建认证服务
-func NewAuthService() *AuthService {
-	// 初始化模拟数据
+// db: GORM 数据库连接（可选，如果为 nil 则使用内存存储）
+// redisClient: Redis 客户端（可选，如果为 nil 则使用内存存储）
+func NewAuthService(db *gormDB.DB, redisClient *redis.Client) *AuthService {
+	// 初始化模拟数据（如果未配置数据库，使用内存存储）
 	users := map[string]*User{
 		"admin": {
 			UserID:   "1",
@@ -60,9 +72,81 @@ func NewAuthService() *AuthService {
 		},
 	}
 
-	return &AuthService{
+	service := &AuthService{
+		db:     db,
+		redis:  redisClient,
 		users:  users,
 		tokens: make(map[string]*TokenInfo),
+	}
+
+	// 如果配置了数据库，初始化表结构并插入初始数据
+	if db != nil {
+		// 自动迁移表结构
+		if err := db.AutoMigrate(&model.UserModel{}); err != nil {
+			logger.Error(context.Background(), "Failed to migrate user table: %v", err)
+		} else {
+			logger.Info(context.Background(), "User table migrated successfully")
+		}
+
+		// 插入初始用户数据（如果不存在）
+		service.initDefaultUsers(context.Background(), db)
+		logger.Info(context.Background(), "AuthService initialized with database")
+	} else {
+		logger.Info(context.Background(), "AuthService initialized with in-memory storage")
+	}
+
+	// 如果配置了 Redis，使用 Redis 存储 token
+	if redisClient != nil {
+		logger.Info(context.Background(), "AuthService initialized with Redis cache")
+	} else {
+		logger.Info(context.Background(), "AuthService initialized with in-memory token storage")
+	}
+
+	return service
+}
+
+// initDefaultUsers 初始化默认用户数据
+func (s *AuthService) initDefaultUsers(ctx context.Context, db *gormDB.DB) {
+	// 检查是否已有用户
+	var count int64
+	db.Model(&model.UserModel{}).Count(&count)
+	if count > 0 {
+		return // 已有用户，不插入
+	}
+
+	// 插入默认用户
+	defaultUsers := []*model.UserModel{
+		{
+			UserID:   "1",
+			Username: "admin",
+			Password: "admin123", // 实际应该使用 bcrypt 等哈希
+			Email:    "admin@example.com",
+			Nickname: "管理员",
+			Avatar:   "",
+			Status:   1,
+		},
+		{
+			UserID:   "2",
+			Username: "user1",
+			Password: "user123",
+			Email:    "user1@example.com",
+			Nickname: "用户1",
+			Avatar:   "",
+			Status:   1,
+		},
+	}
+
+	// 设置角色
+	defaultUsers[0].SetRoles([]string{"admin", "user"})
+	defaultUsers[1].SetRoles([]string{"user"})
+
+	// 批量插入
+	for _, user := range defaultUsers {
+		if err := db.Create(user).Error; err != nil {
+			logger.Error(ctx, "Failed to create default user %s: %v", user.Username, err)
+		} else {
+			logger.Info(ctx, "Created default user: %s", user.Username)
+		}
 	}
 }
 
@@ -70,25 +154,63 @@ func NewAuthService() *AuthService {
 func (s *AuthService) Login(ctx context.Context, username, password string) (*gen.LoginResponse, error) {
 	logger.Info(ctx, "Login attempt: username=%s", username)
 
-	// 查找用户
-	user, exists := s.users[username]
-	if !exists {
-		return &gen.LoginResponse{
-			Code:    401,
-			Message: "用户名或密码错误",
-		}, nil
-	}
+	var userModel *model.UserModel
+	var err error
 
-	// 验证密码（实际应该使用哈希比较）
-	if user.Password != password {
-		return &gen.LoginResponse{
-			Code:    401,
-			Message: "用户名或密码错误",
-		}, nil
+	// 从数据库查询用户
+	if s.db != nil {
+		userModel = &model.UserModel{}
+		if err := s.db.WithContext(ctx).Where("username = ? AND status = ?", username, 1).First(userModel).Error; err != nil {
+			if err == gormDB.ErrRecordNotFound {
+				logger.Warn(ctx, "User not found: username=%s", username)
+				return &gen.LoginResponse{
+					Code:    401,
+					Message: "用户名或密码错误",
+				}, nil
+			}
+			logger.Error(ctx, "Failed to query user: %v", err)
+			return &gen.LoginResponse{
+				Code:    500,
+				Message: "查询用户失败",
+			}, nil
+		}
+
+		// 验证密码（实际应该使用 bcrypt 等哈希比较）
+		if userModel.Password != password {
+			logger.Warn(ctx, "Invalid password: username=%s", username)
+			return &gen.LoginResponse{
+				Code:    401,
+				Message: "用户名或密码错误",
+			}, nil
+		}
+	} else {
+		// 使用内存存储（向后兼容）
+		user, exists := s.users[username]
+		if !exists {
+			return &gen.LoginResponse{
+				Code:    401,
+				Message: "用户名或密码错误",
+			}, nil
+		}
+		if user.Password != password {
+			return &gen.LoginResponse{
+				Code:    401,
+				Message: "用户名或密码错误",
+			}, nil
+		}
+		// 转换为 UserModel 格式
+		userModel = &model.UserModel{
+			UserID:   user.UserID,
+			Username: user.Username,
+			Email:    user.Email,
+			Nickname: user.Nickname,
+			Avatar:   user.Avatar,
+		}
+		userModel.SetRoles(user.Roles)
 	}
 
 	// 生成令牌
-	token, refreshToken, expiresIn, err := s.generateTokens(user.UserID)
+	token, refreshToken, expiresIn, err := s.generateTokens(userModel.UserID)
 	if err != nil {
 		logger.Error(ctx, "Failed to generate tokens: %v", err)
 		return &gen.LoginResponse{
@@ -97,14 +219,32 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 		}, nil
 	}
 
-	// 存储令牌信息
-	s.tokens[token] = &TokenInfo{
-		UserID:       user.UserID,
+	// 存储令牌信息到 Redis 或内存
+	tokenInfo := &TokenInfo{
+		UserID:       userModel.UserID,
 		ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
 		RefreshToken: refreshToken,
 	}
 
-	logger.Info(ctx, "Login success: username=%s, user_id=%s", username, user.UserID)
+	if s.redis != nil {
+		// 存储到 Redis
+		if err := s.saveTokenToRedis(ctx, token, tokenInfo, time.Duration(expiresIn)*time.Second); err != nil {
+			logger.Error(ctx, "Failed to save token to Redis: %v", err)
+			return &gen.LoginResponse{
+				Code:    500,
+				Message: "保存令牌失败",
+			}, nil
+		}
+		// 同时存储 refresh token 映射
+		if err := s.saveRefreshTokenToRedis(ctx, refreshToken, token, time.Duration(expiresIn+3600)*time.Second); err != nil {
+			logger.Error(ctx, "Failed to save refresh token to Redis: %v", err)
+		}
+	} else {
+		// 存储到内存（向后兼容）
+		s.tokens[token] = tokenInfo
+	}
+
+	logger.Info(ctx, "Login success: username=%s, user_id=%s", username, userModel.UserID)
 
 	return &gen.LoginResponse{
 		Code:         200,
@@ -113,12 +253,12 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 		RefreshToken: refreshToken,
 		ExpiresIn:    expiresIn,
 		UserInfo: &gen.UserInfo{
-			UserId:   user.UserID,
-			Username: user.Username,
-			Email:    user.Email,
-			Nickname: user.Nickname,
-			Avatar:   user.Avatar,
-			Roles:    user.Roles,
+			UserId:   userModel.UserID,
+			Username: userModel.Username,
+			Email:    userModel.Email,
+			Nickname: userModel.Nickname,
+			Avatar:   userModel.Avatar,
+			Roles:    userModel.GetRoles(),
 		},
 	}, nil
 }
@@ -127,18 +267,41 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.VerifyTokenResponse, error) {
 	logger.Info(ctx, "Verifying token")
 
-	tokenInfo, exists := s.tokens[token]
-	if !exists {
-		return &gen.VerifyTokenResponse{
-			Code:    401,
-			Message: "令牌无效",
-			Valid:   false,
-		}, nil
+	var tokenInfo *TokenInfo
+	var err error
+
+	// 从 Redis 或内存获取令牌信息
+	if s.redis != nil {
+		tokenInfo, err = s.getTokenFromRedis(ctx, token)
+		if err != nil {
+			logger.Warn(ctx, "Token not found in Redis: %v", err)
+			return &gen.VerifyTokenResponse{
+				Code:    401,
+				Message: "令牌无效",
+				Valid:   false,
+			}, nil
+		}
+	} else {
+		// 从内存获取（向后兼容）
+		var exists bool
+		tokenInfo, exists = s.tokens[token]
+		if !exists {
+			return &gen.VerifyTokenResponse{
+				Code:    401,
+				Message: "令牌无效",
+				Valid:   false,
+			}, nil
+		}
 	}
 
 	// 检查是否过期
 	if time.Now().After(tokenInfo.ExpiresAt) {
-		delete(s.tokens, token)
+		// 删除过期的令牌
+		if s.redis != nil {
+			s.deleteTokenFromRedis(ctx, token)
+		} else {
+			delete(s.tokens, token)
+		}
 		return &gen.VerifyTokenResponse{
 			Code:    401,
 			Message: "令牌已过期",
@@ -147,13 +310,43 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 	}
 
 	// 获取用户信息
-	user := s.getUserByID(tokenInfo.UserID)
-	if user == nil {
-		return &gen.VerifyTokenResponse{
-			Code:    404,
-			Message: "用户不存在",
-			Valid:   false,
-		}, nil
+	var userModel *model.UserModel
+	if s.db != nil {
+		// 从数据库查询用户
+		userModel = &model.UserModel{}
+		if err := s.db.Where("user_id = ? AND status = ?", tokenInfo.UserID, 1).First(userModel).Error; err != nil {
+			if err == gormDB.ErrRecordNotFound {
+				return &gen.VerifyTokenResponse{
+					Code:    404,
+					Message: "用户不存在",
+					Valid:   false,
+				}, nil
+			}
+			logger.Error(ctx, "Failed to query user: %v", err)
+			return &gen.VerifyTokenResponse{
+				Code:    500,
+				Message: "查询用户失败",
+				Valid:   false,
+			}, nil
+		}
+	} else {
+		// 从内存获取（向后兼容）
+		user := s.getUserByID(tokenInfo.UserID)
+		if user == nil {
+			return &gen.VerifyTokenResponse{
+				Code:    404,
+				Message: "用户不存在",
+				Valid:   false,
+			}, nil
+		}
+		userModel = &model.UserModel{
+			UserID:   user.UserID,
+			Username: user.Username,
+			Email:    user.Email,
+			Nickname: user.Nickname,
+			Avatar:   user.Avatar,
+		}
+		userModel.SetRoles(user.Roles)
 	}
 
 	return &gen.VerifyTokenResponse{
@@ -161,12 +354,12 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 		Message: "令牌有效",
 		Valid:   true,
 		UserInfo: &gen.UserInfo{
-			UserId:   user.UserID,
-			Username: user.Username,
-			Email:    user.Email,
-			Nickname: user.Nickname,
-			Avatar:   user.Avatar,
-			Roles:    user.Roles,
+			UserId:   userModel.UserID,
+			Username: userModel.Username,
+			Email:    userModel.Email,
+			Nickname: userModel.Nickname,
+			Avatar:   userModel.Avatar,
+			Roles:    userModel.GetRoles(),
 		},
 	}, nil
 }
@@ -175,38 +368,92 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*gen.RefreshTokenResponse, error) {
 	logger.Info(ctx, "Refreshing token")
 
-	// 查找对应的令牌
 	var tokenInfo *TokenInfo
 	var token string
-	for t, info := range s.tokens {
-		if info.RefreshToken == refreshToken {
-			tokenInfo = info
-			token = t
-			break
+	var err error
+
+	// 从 Redis 或内存查找对应的令牌
+	if s.redis != nil {
+		// 从 Redis 获取 refresh token 对应的 access token
+		token, err = s.getTokenByRefreshTokenFromRedis(ctx, refreshToken)
+		if err != nil {
+			logger.Warn(ctx, "Refresh token not found in Redis: %v", err)
+			return &gen.RefreshTokenResponse{
+				Code:    401,
+				Message: "刷新令牌无效",
+			}, nil
+		}
+		// 获取 token 信息
+		tokenInfo, err = s.getTokenFromRedis(ctx, token)
+		if err != nil {
+			logger.Warn(ctx, "Token not found in Redis: %v", err)
+			return &gen.RefreshTokenResponse{
+				Code:    401,
+				Message: "刷新令牌无效",
+			}, nil
+		}
+	} else {
+		// 从内存查找（向后兼容）
+		found := false
+		for t, info := range s.tokens {
+			if info.RefreshToken == refreshToken {
+				tokenInfo = info
+				token = t
+				found = true
+				break
+			}
+		}
+		if !found {
+			return &gen.RefreshTokenResponse{
+				Code:    401,
+				Message: "刷新令牌无效",
+			}, nil
 		}
 	}
 
-	if tokenInfo == nil {
-		return &gen.RefreshTokenResponse{
-			Code:    401,
-			Message: "刷新令牌无效",
-		}, nil
-	}
-
 	// 获取用户信息
-	user := s.getUserByID(tokenInfo.UserID)
-	if user == nil {
-		return &gen.RefreshTokenResponse{
-			Code:    404,
-			Message: "用户不存在",
-		}, nil
+	var userModel *model.UserModel
+	if s.db != nil {
+		// 从数据库查询用户
+		userModel = &model.UserModel{}
+		if err := s.db.Where("user_id = ? AND status = ?", tokenInfo.UserID, 1).First(userModel).Error; err != nil {
+			if err == gormDB.ErrRecordNotFound {
+				return &gen.RefreshTokenResponse{
+					Code:    404,
+					Message: "用户不存在",
+				}, nil
+			}
+			logger.Error(ctx, "Failed to query user: %v", err)
+			return &gen.RefreshTokenResponse{
+				Code:    500,
+				Message: "查询用户失败",
+			}, nil
+		}
+	} else {
+		// 从内存获取（向后兼容）
+		user := s.getUserByID(tokenInfo.UserID)
+		if user == nil {
+			return &gen.RefreshTokenResponse{
+				Code:    404,
+				Message: "用户不存在",
+			}, nil
+		}
+		userModel = &model.UserModel{
+			UserID:   user.UserID,
+			Username: user.Username,
+		}
 	}
 
 	// 删除旧令牌
-	delete(s.tokens, token)
+	if s.redis != nil {
+		s.deleteTokenFromRedis(ctx, token)
+		s.deleteRefreshTokenFromRedis(ctx, refreshToken)
+	} else {
+		delete(s.tokens, token)
+	}
 
 	// 生成新令牌
-	newToken, newRefreshToken, expiresIn, err := s.generateTokens(user.UserID)
+	newToken, newRefreshToken, expiresIn, err := s.generateTokens(userModel.UserID)
 	if err != nil {
 		logger.Error(ctx, "Failed to generate tokens: %v", err)
 		return &gen.RefreshTokenResponse{
@@ -216,10 +463,28 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 	}
 
 	// 存储新令牌
-	s.tokens[newToken] = &TokenInfo{
-		UserID:       user.UserID,
+	newTokenInfo := &TokenInfo{
+		UserID:       userModel.UserID,
 		ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
 		RefreshToken: newRefreshToken,
+	}
+
+	if s.redis != nil {
+		// 存储到 Redis
+		if err := s.saveTokenToRedis(ctx, newToken, newTokenInfo, time.Duration(expiresIn)*time.Second); err != nil {
+			logger.Error(ctx, "Failed to save token to Redis: %v", err)
+			return &gen.RefreshTokenResponse{
+				Code:    500,
+				Message: "保存令牌失败",
+			}, nil
+		}
+		// 存储 refresh token 映射
+		if err := s.saveRefreshTokenToRedis(ctx, newRefreshToken, newToken, time.Duration(expiresIn+3600)*time.Second); err != nil {
+			logger.Error(ctx, "Failed to save refresh token to Redis: %v", err)
+		}
+	} else {
+		// 存储到内存（向后兼容）
+		s.tokens[newToken] = newTokenInfo
 	}
 
 	return &gen.RefreshTokenResponse{
@@ -235,24 +500,53 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 func (s *AuthService) GetUserInfo(ctx context.Context, userID string) (*gen.GetUserInfoResponse, error) {
 	logger.Info(ctx, "Getting user info: user_id=%s", userID)
 
-	user := s.getUserByID(userID)
-	if user == nil {
-		return &gen.GetUserInfoResponse{
-			Code:    404,
-			Message: "用户不存在",
-		}, nil
+	var userModel *model.UserModel
+
+	if s.db != nil {
+		// 从数据库查询用户
+		userModel = &model.UserModel{}
+		if err := s.db.Where("user_id = ? AND status = ?", userID, 1).First(userModel).Error; err != nil {
+			if err == gormDB.ErrRecordNotFound {
+				return &gen.GetUserInfoResponse{
+					Code:    404,
+					Message: "用户不存在",
+				}, nil
+			}
+			logger.Error(ctx, "Failed to query user: %v", err)
+			return &gen.GetUserInfoResponse{
+				Code:    500,
+				Message: "查询用户失败",
+			}, nil
+		}
+	} else {
+		// 从内存获取（向后兼容）
+		user := s.getUserByID(userID)
+		if user == nil {
+			return &gen.GetUserInfoResponse{
+				Code:    404,
+				Message: "用户不存在",
+			}, nil
+		}
+		userModel = &model.UserModel{
+			UserID:   user.UserID,
+			Username: user.Username,
+			Email:    user.Email,
+			Nickname: user.Nickname,
+			Avatar:   user.Avatar,
+		}
+		userModel.SetRoles(user.Roles)
 	}
 
 	return &gen.GetUserInfoResponse{
 		Code:    200,
 		Message: "获取成功",
 		UserInfo: &gen.UserInfo{
-			UserId:   user.UserID,
-			Username: user.Username,
-			Email:    user.Email,
-			Nickname: user.Nickname,
-			Avatar:   user.Avatar,
-			Roles:    user.Roles,
+			UserId:   userModel.UserID,
+			Username: userModel.Username,
+			Email:    userModel.Email,
+			Nickname: userModel.Nickname,
+			Avatar:   userModel.Avatar,
+			Roles:    userModel.GetRoles(),
 		},
 	}, nil
 }
@@ -279,7 +573,7 @@ func (s *AuthService) generateTokens(userID string) (token, refreshToken string,
 	return token, refreshToken, expiresIn, nil
 }
 
-// getUserByID 根据用户ID获取用户
+// getUserByID 根据用户ID获取用户（仅用于内存存储的向后兼容）
 func (s *AuthService) getUserByID(userID string) *User {
 	for _, user := range s.users {
 		if user.UserID == userID {
@@ -287,4 +581,96 @@ func (s *AuthService) getUserByID(userID string) *User {
 		}
 	}
 	return nil
+}
+
+// ==================== Redis Token 操作方法 ====================
+
+// getTokenKey 获取 token 的 Redis key
+func (s *AuthService) getTokenKey(token string) string {
+	return fmt.Sprintf("auth:token:%s", token)
+}
+
+// getRefreshTokenKey 获取 refresh token 的 Redis key
+func (s *AuthService) getRefreshTokenKey(refreshToken string) string {
+	return fmt.Sprintf("auth:refresh:%s", refreshToken)
+}
+
+// saveTokenToRedis 保存 token 到 Redis
+func (s *AuthService) saveTokenToRedis(ctx context.Context, token string, tokenInfo *TokenInfo, ttl time.Duration) error {
+	if s.redis == nil {
+		return fmt.Errorf("redis client is nil")
+	}
+
+	key := s.getTokenKey(token)
+	data, err := json.Marshal(tokenInfo)
+	if err != nil {
+		return fmt.Errorf("failed to marshal token info: %w", err)
+	}
+
+	return s.redis.GetClient().Set(ctx, key, data, ttl).Err()
+}
+
+// getTokenFromRedis 从 Redis 获取 token
+func (s *AuthService) getTokenFromRedis(ctx context.Context, token string) (*TokenInfo, error) {
+	if s.redis == nil {
+		return nil, fmt.Errorf("redis client is nil")
+	}
+
+	key := s.getTokenKey(token)
+	data, err := s.redis.GetClient().Get(ctx, key).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get token from redis: %w", err)
+	}
+
+	var tokenInfo TokenInfo
+	if err := json.Unmarshal([]byte(data), &tokenInfo); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal token info: %w", err)
+	}
+
+	return &tokenInfo, nil
+}
+
+// deleteTokenFromRedis 从 Redis 删除 token
+func (s *AuthService) deleteTokenFromRedis(ctx context.Context, token string) error {
+	if s.redis == nil {
+		return fmt.Errorf("redis client is nil")
+	}
+
+	key := s.getTokenKey(token)
+	return s.redis.GetClient().Del(ctx, key).Err()
+}
+
+// saveRefreshTokenToRedis 保存 refresh token 到 Redis（映射到 access token）
+func (s *AuthService) saveRefreshTokenToRedis(ctx context.Context, refreshToken, accessToken string, ttl time.Duration) error {
+	if s.redis == nil {
+		return fmt.Errorf("redis client is nil")
+	}
+
+	key := s.getRefreshTokenKey(refreshToken)
+	return s.redis.GetClient().Set(ctx, key, accessToken, ttl).Err()
+}
+
+// getTokenByRefreshTokenFromRedis 从 Redis 通过 refresh token 获取 access token
+func (s *AuthService) getTokenByRefreshTokenFromRedis(ctx context.Context, refreshToken string) (string, error) {
+	if s.redis == nil {
+		return "", fmt.Errorf("redis client is nil")
+	}
+
+	key := s.getRefreshTokenKey(refreshToken)
+	token, err := s.redis.GetClient().Get(ctx, key).Result()
+	if err != nil {
+		return "", fmt.Errorf("failed to get token by refresh token: %w", err)
+	}
+
+	return token, nil
+}
+
+// deleteRefreshTokenFromRedis 从 Redis 删除 refresh token
+func (s *AuthService) deleteRefreshTokenFromRedis(ctx context.Context, refreshToken string) error {
+	if s.redis == nil {
+		return fmt.Errorf("redis client is nil")
+	}
+
+	key := s.getRefreshTokenKey(refreshToken)
+	return s.redis.GetClient().Del(ctx, key).Err()
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 
 	"gly-hub/go-dandelion/quickgo/logger"
+	"gly-hub/go-dandelion/quickgo/tracing"
 )
 
 // Server HTTP服务器封装
@@ -27,11 +28,11 @@ type Config struct {
 	// Fiber 配置
 	FiberConfig fiber.Config // Fiber 应用配置
 	// 中间件配置
-	EnableCORS      bool     // 是否启用 CORS，默认 true
-	CORSConfig      CORSConfig // CORS 配置
-	EnableRecovery  bool     // 是否启用恢复中间件，默认 true
-	EnableLogging   bool     // 是否启用日志中间件，默认 true
-	EnableTrace     bool     // 是否启用链路追踪中间件，默认 true
+	EnableCORS     bool       // 是否启用 CORS，默认 true
+	CORSConfig     CORSConfig // CORS 配置
+	EnableRecovery bool       // 是否启用恢复中间件，默认 true
+	EnableLogging  bool       // 是否启用日志中间件，默认 true
+	EnableTrace    bool       // 是否启用链路追踪中间件，默认 true
 	// 自定义中间件
 	Middlewares []fiber.Handler // 自定义中间件列表
 }
@@ -93,7 +94,13 @@ func NewServer(config Config) (*Server, error) {
 func (s *Server) registerDefaultMiddlewares() {
 	// 链路追踪中间件（应该最先执行，以便后续中间件可以使用 trace ID）
 	if s.config.EnableTrace {
-		s.app.Use(TraceMiddleware())
+		// 如果 OpenTelemetry tracing 已启用，使用 OpenTelemetry 中间件
+		// 否则使用自定义的 TraceMiddleware（用于日志关联）
+		if tracing.IsEnabled() {
+			s.app.Use(tracing.Middleware())
+		} else {
+			s.app.Use(TraceMiddleware())
+		}
 	}
 
 	// 日志中间件
@@ -173,7 +180,7 @@ func defaultErrorHandler(c *fiber.Ctx, err error) error {
 	} else {
 		ctx = logger.StartSpan(ctx)
 	}
-	
+
 	// 记录错误日志
 	logger.Error(ctx, "HTTP request error: %v", err)
 
@@ -188,4 +195,3 @@ func defaultErrorHandler(c *fiber.Ctx, err error) error {
 		"code":  code,
 	})
 }
-

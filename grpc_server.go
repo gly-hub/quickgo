@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"gly-hub/go-dandelion/quickgo/grpc"
 	"gly-hub/go-dandelion/quickgo/logger"
+	"gly-hub/go-dandelion/quickgo/tracing"
 	"net"
 	"os"
 	"time"
@@ -102,17 +103,27 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 		return nil, err
 	}
 
+	// 构建拦截器链
+	unaryInterceptors := []rpc.UnaryServerInterceptor{
+		grpc.LoggingInterceptor(),
+		grpc.RecoveryInterceptor(),
+	}
+	streamInterceptors := []rpc.StreamServerInterceptor{
+		grpc.StreamLoggingInterceptor(),
+	}
+
+	// 如果启用了 OpenTelemetry tracing，添加 tracing 拦截器
+	if tracing.IsEnabled() {
+		unaryInterceptors = append([]rpc.UnaryServerInterceptor{tracing.UnaryServerInterceptor()}, unaryInterceptors...)
+		streamInterceptors = append([]rpc.StreamServerInterceptor{tracing.StreamServerInterceptor()}, streamInterceptors...)
+	}
+
 	server, err := grpc.NewServer(grpc.Config{
 		Address: "0.0.0.0",
 		Port:    config.Port,
 		Options: []rpc.ServerOption{
-			grpc.ChainUnaryInterceptors(
-				grpc.LoggingInterceptor(),
-				grpc.RecoveryInterceptor(),
-			),
-			grpc.ChainStreamInterceptors(
-				grpc.StreamLoggingInterceptor(),
-			),
+			rpc.ChainUnaryInterceptor(unaryInterceptors...),
+			rpc.ChainStreamInterceptor(streamInterceptors...),
 			// 添加keepalive配置
 			rpc.KeepaliveParams(keepalive.ServerParameters{
 				Time:    keepTime,
@@ -149,7 +160,7 @@ func (s *GrpcServer) Start() error {
 	}
 	serverAddress := fmt.Sprintf("%s:%d", serverIP, s.config.Port)
 	logger.Info(context.Background(), "Server will listen on %s:%d, register address: %s", s.config.Address, s.config.Port, serverAddress)
-	
+
 	// 启动服务器（异步）
 	go func() {
 		logger.Info(context.Background(), "Starting gRPC server on %s:%d", s.config.Address, s.config.Port)
@@ -167,13 +178,13 @@ func (s *GrpcServer) Start() error {
 	if s.registrar != nil {
 		s.registrar.Close()
 	}
-	
+
 	if s.config.Etcd != nil {
 		dialTimeout, err := time.ParseDuration(s.config.Etcd.DialTimeout)
 		if err != nil {
 			return fmt.Errorf("failed to parse etcd dial timeout: %w", err)
 		}
-		
+
 		etcdConfig := grpc.EtcdConfig{
 			Endpoints:   s.config.Etcd.Endpoints,
 			DialTimeout: dialTimeout,
@@ -182,22 +193,22 @@ func (s *GrpcServer) Start() error {
 			Username:    s.config.Etcd.Username,
 			Password:    s.config.Etcd.Password,
 		}
-		
+
 		registry, err := grpc.NewEtcdRegistry(etcdConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create etcd registry: %w", err)
 		}
-		
+
 		metadata := map[string]string{
 			"version": "1.0.0",
 			"weight":  "10",
 			"region":  "default",
 		}
-		
+
 		// 使用包含端口的完整地址创建新的 registrar
 		s.registrar = grpc.NewServiceRegistrar(registry, s.config.ServiceName, serverAddress, metadata)
 	}
-	
+
 	if err := s.registrar.Register(context.Background()); err != nil {
 		logger.Fatal(context.Background(), "Failed to register service to etcd: %v", err)
 	}
