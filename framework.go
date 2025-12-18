@@ -9,11 +9,11 @@ import (
 	"sync"
 	"syscall"
 
-	"quickgo/db/gorm"
-	"quickgo/db/mongodb"
-	"quickgo/db/redis"
-	"quickgo/logger"
-	"quickgo/tracing"
+	"github.com/team-dandelion/quickgo/db/gorm"
+	"github.com/team-dandelion/quickgo/db/mongodb"
+	"github.com/team-dandelion/quickgo/db/redis"
+	"github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/tracing"
 )
 
 // Framework 主体框架，统一管理所有组件

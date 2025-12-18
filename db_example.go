@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"quickgo/db/gorm"
-	"quickgo/db/mongodb"
-	"quickgo/db/redis"
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/db/gorm"
+	"github.com/team-dandelion/quickgo/db/mongodb"
+	"github.com/team-dandelion/quickgo/db/redis"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 // ExampleDatabaseUsage 数据库使用示例

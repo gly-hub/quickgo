@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	redisClient "github.com/redis/go-redis/v9"
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 // Manager Redis 多客户端管理器

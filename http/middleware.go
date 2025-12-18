@@ -6,8 +6,8 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
-	"quickgo/logger"
-	"quickgo/tracing"
+	"github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/tracing"
 )
 
 const (

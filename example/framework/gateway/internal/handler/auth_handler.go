@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"quickgo/db/redis"
-	"quickgo/example/framework/gateway/internal/service"
-	"quickgo/grpcep"
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/db/redis"
+	"github.com/team-dandelion/quickgo/example/framework/gateway/internal/service"
+	"github.com/team-dandelion/quickgo/grpcep"
+	"github.com/team-dandelion/quickgo/logger"
 
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/grpc"

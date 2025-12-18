@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/base"
 
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 const (

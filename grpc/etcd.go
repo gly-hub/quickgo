@@ -11,7 +11,7 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 const (

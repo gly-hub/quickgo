@@ -2,10 +2,10 @@ package handler
 
 import (
 	"context"
-	gen "quickgo/example/framework/auth-server/api/proto/gen"
-	"quickgo/example/framework/auth-server/internal/service"
-	"quickgo/grpcep"
-	"quickgo/logger"
+	gen "github.com/team-dandelion/quickgo/example/framework/auth-server/api/proto/gen"
+	"github.com/team-dandelion/quickgo/example/framework/auth-server/internal/service"
+	"github.com/team-dandelion/quickgo/grpcep"
+	"github.com/team-dandelion/quickgo/logger"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/grpc/resolver"
 
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 const (

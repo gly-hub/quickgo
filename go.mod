@@ -1,4 +1,4 @@
-module quickgo
+module github.com/team-dandelion/quickgo
 
 go 1.25.4
 
