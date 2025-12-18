@@ -58,6 +58,20 @@ docker run -d --name etcd \
   --listen-client-urls=http://0.0.0.0:2379
 ```
 
+### 1.1 启动 Jaeger（可选，用于链路追踪）
+
+```bash
+docker run -d --name jaeger \
+  -p 6831:6831/udp \
+  -p 16686:16686 \
+  -p 14268:14268 \
+  -p 4317:4317 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+```
+
+访问 Jaeger UI: http://localhost:16686
+
 ### 2. 启动 Auth Server
 
 ```bash
@@ -116,8 +130,50 @@ curl -X GET http://localhost:8080/api/v1/auth/user/1 \
 2. **配置驱动**: 通过 YAML 配置文件管理所有组件
 3. **服务发现**: 使用 etcd 进行服务注册和发现
 4. **负载均衡**: 支持多种负载均衡策略
-5. **链路追踪**: 完整的链路追踪支持
+5. **链路追踪**: 完整的链路追踪支持（OpenTelemetry + Jaeger）
 6. **优雅关闭**: 支持信号处理和优雅关闭
+
+## 链路追踪（Jaeger）
+
+项目已集成 OpenTelemetry 和 Jaeger，支持分布式链路追踪。
+
+### 配置说明
+
+在配置文件中添加 `tracing` 配置：
+
+```yaml
+tracing:
+  enabled: true
+  serviceName: "auth-server"
+  serviceVersion: "1.0.0"
+  environment: "local"
+  samplingRate: 1.0  # 采样率：1.0 表示采样所有请求
+  # 方式1：使用 OTLP（推荐）
+  otlp:
+    enabled: true
+    endpoint: "http://localhost:4318"  # HTTP 端点
+    useGRPC: false
+    insecure: true
+  # 方式2：使用 Jaeger Agent（UDP）
+  jaeger:
+    enabled: false
+    agentHost: "localhost"
+    agentPort: 6831
+```
+
+### 查看追踪数据
+
+1. 启动 Jaeger：`docker run -d -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:latest`
+2. 访问 Jaeger UI：http://localhost:16686
+3. 选择服务名称（如 `auth-server` 或 `gateway`）
+4. 点击 "Find Traces" 查看追踪数据
+
+### 追踪范围
+
+- ✅ HTTP 请求（Gateway）
+- ✅ gRPC 调用（Server 和 Client）
+- ✅ 数据库操作（GORM）
+- ✅ Redis 操作（可选）
 
 ## 目录说明
 

@@ -9,7 +9,11 @@ import (
 	"sync"
 	"syscall"
 
+	"gly-hub/go-dandelion/quickgo/db/gorm"
+	"gly-hub/go-dandelion/quickgo/db/mongodb"
+	"gly-hub/go-dandelion/quickgo/db/redis"
 	"gly-hub/go-dandelion/quickgo/logger"
+	"gly-hub/go-dandelion/quickgo/tracing"
 )
 
 // Framework 主体框架，统一管理所有组件
@@ -24,6 +28,11 @@ type Framework struct {
 	grpcServer    *GrpcServer
 	grpcClientMgr *GrpcClientManager
 	httpServer    *HTTPServer
+
+	// 数据库组件
+	gormManager    *gorm.Manager
+	mongodbManager *mongodb.Manager
+	redisManager   *redis.Manager
 
 	// 组件注册表（用于扩展）
 	components map[string]Component
@@ -51,6 +60,14 @@ type FrameworkConfig struct {
 
 	// HTTP Server 配置（可选）
 	HTTPServer *HTTPServerConfig
+
+	// 数据库配置（可选）
+	Gorm    *gorm.GormManagerConfig
+	MongoDB *mongodb.MongoManagerConfig
+	Redis   *redis.RedisManagerConfig
+
+	// 链路追踪配置（可选）
+	Tracing *tracing.Config
 }
 
 // FrameworkOption 框架配置选项
@@ -159,6 +176,34 @@ func ConfigOptionWithHTTPServer(server *HTTPServerConfig) FrameworkOption {
 	}
 }
 
+// ConfigOptionWithGorm 配置 GORM 数据库管理器
+func ConfigOptionWithGorm(config *gorm.GormManagerConfig) FrameworkOption {
+	return func(c *FrameworkConfig) {
+		c.Gorm = config
+	}
+}
+
+// ConfigOptionWithMongoDB 配置 MongoDB 数据库管理器
+func ConfigOptionWithMongoDB(config *mongodb.MongoManagerConfig) FrameworkOption {
+	return func(c *FrameworkConfig) {
+		c.MongoDB = config
+	}
+}
+
+// ConfigOptionWithRedis 配置 Redis 数据库管理器
+func ConfigOptionWithRedis(config *redis.RedisManagerConfig) FrameworkOption {
+	return func(c *FrameworkConfig) {
+		c.Redis = config
+	}
+}
+
+// ConfigOptionWithTracing 配置链路追踪
+func ConfigOptionWithTracing(config *tracing.Config) FrameworkOption {
+	return func(c *FrameworkConfig) {
+		c.Tracing = config
+	}
+}
+
 // Init 初始化所有组件
 // 只初始化通过 Option 显式配置的组件
 func (f *Framework) Init() error {
@@ -171,7 +216,14 @@ func (f *Framework) Init() error {
 
 	ctx := context.Background()
 
-	// 1. 初始化 Logger（优先，其他组件需要日志）
+	// 1. 初始化链路追踪（最优先，其他组件可能需要追踪）
+	if f.config.Tracing != nil {
+		if err := f.initTracing(ctx); err != nil {
+			return fmt.Errorf("failed to init tracing: %w", err)
+		}
+	}
+
+	// 2. 初始化 Logger（优先，其他组件需要日志）
 	if f.config.Logger != nil && f.config.Logger.Enabled {
 		if err := f.initLogger(ctx); err != nil {
 			return fmt.Errorf("failed to init logger: %w", err)
@@ -184,28 +236,49 @@ func (f *Framework) Init() error {
 		f.logger = logger.GetDefault()
 	}
 
-	// 2. 初始化 gRPC Server（仅当通过 Option 配置时）
+	// 3. 初始化 gRPC Server（仅当通过 Option 配置时）
 	if f.config.GrpcServer != nil {
 		if err := f.initGrpcServer(ctx); err != nil {
 			return fmt.Errorf("failed to init grpc server: %w", err)
 		}
 	}
 
-	// 3. 初始化 gRPC Client Manager（仅当通过 Option 配置时）
+	// 4. 初始化 gRPC Client Manager（仅当通过 Option 配置时）
 	if f.config.GrpcClient != nil {
 		if err := f.initGrpcClientManager(ctx); err != nil {
 			return fmt.Errorf("failed to init grpc client manager: %w", err)
 		}
 	}
 
-	// 4. 初始化 HTTP Server（仅当通过 Option 配置时）
+	// 5. 初始化 HTTP Server（仅当通过 Option 配置时）
 	if f.config.HTTPServer != nil && f.config.HTTPServer.Enabled {
 		if err := f.initHTTPServer(ctx); err != nil {
 			return fmt.Errorf("failed to init http server: %w", err)
 		}
 	}
 
-	// 5. 初始化自定义组件
+	// 6. 初始化 GORM 数据库管理器（仅当通过 Option 配置时）
+	if f.config.Gorm != nil {
+		if err := f.initGormManager(ctx); err != nil {
+			return fmt.Errorf("failed to init gorm manager: %w", err)
+		}
+	}
+
+	// 7. 初始化 MongoDB 数据库管理器（仅当通过 Option 配置时）
+	if f.config.MongoDB != nil {
+		if err := f.initMongoDBManager(ctx); err != nil {
+			return fmt.Errorf("failed to init mongodb manager: %w", err)
+		}
+	}
+
+	// 8. 初始化 Redis 数据库管理器（仅当通过 Option 配置时）
+	if f.config.Redis != nil {
+		if err := f.initRedisManager(ctx); err != nil {
+			return fmt.Errorf("failed to init redis manager: %w", err)
+		}
+	}
+
+	// 9. 初始化自定义组件
 	for _, component := range f.components {
 		if component.IsEnabled() {
 			if err := component.Init(ctx); err != nil {
@@ -311,7 +384,35 @@ func (f *Framework) Stop() error {
 		}
 	}
 
+	// 5. 关闭数据库连接
+	if f.redisManager != nil {
+		if err := f.redisManager.Close(); err != nil {
+			logger.Error(ctx, "Failed to close redis manager: %v", err)
+		}
+	}
+
+	if f.mongodbManager != nil {
+		if err := f.mongodbManager.Close(); err != nil {
+			logger.Error(ctx, "Failed to close mongodb manager: %v", err)
+		}
+	}
+
+	if f.gormManager != nil {
+		if err := f.gormManager.Close(); err != nil {
+			logger.Error(ctx, "Failed to close gorm manager: %v", err)
+		}
+	}
+
 	f.stopped = true
+	// 关闭链路追踪
+	if f.config.Tracing != nil && f.config.Tracing.Enabled {
+		if err := tracing.Shutdown(ctx); err != nil {
+			logger.Error(ctx, "Failed to shutdown tracing: %v", err)
+		} else {
+			logger.Info(ctx, "Tracing shutdown successfully")
+		}
+	}
+
 	logger.Info(ctx, "Framework stopped")
 	return nil
 }
@@ -386,6 +487,21 @@ func (f *Framework) HTTPServer() *HTTPServer {
 	return f.httpServer
 }
 
+// GormManager 获取 GORM 数据库管理器实例
+func (f *Framework) GormManager() *gorm.Manager {
+	return f.gormManager
+}
+
+// MongoManager 获取 MongoDB 数据库管理器实例
+func (f *Framework) MongoManager() *mongodb.Manager {
+	return f.mongodbManager
+}
+
+// RedisManager 获取 Redis 数据库管理器实例
+func (f *Framework) RedisManager() *redis.Manager {
+	return f.redisManager
+}
+
 // ==================== 内部初始化方法 ====================
 
 // initLogger 初始化 Logger
@@ -458,5 +574,83 @@ func (f *Framework) initHTTPServer(ctx context.Context) error {
 	}
 
 	f.httpServer = server
+	return nil
+}
+
+// initGormManager 初始化 GORM 数据库管理器
+func (f *Framework) initGormManager(ctx context.Context) error {
+	manager, err := gorm.NewManager(f.config.Gorm)
+	if err != nil {
+		return err
+	}
+	f.gormManager = manager
+	logger.Info(ctx, "GORM manager initialized")
+	return nil
+}
+
+// initMongoDBManager 初始化 MongoDB 数据库管理器
+func (f *Framework) initMongoDBManager(ctx context.Context) error {
+	manager, err := mongodb.NewManager(f.config.MongoDB)
+	if err != nil {
+		return err
+	}
+	f.mongodbManager = manager
+	logger.Info(ctx, "MongoDB manager initialized")
+	return nil
+}
+
+// initRedisManager 初始化 Redis 数据库管理器
+func (f *Framework) initRedisManager(ctx context.Context) error {
+	manager, err := redis.NewManager(f.config.Redis)
+	if err != nil {
+		return err
+	}
+	f.redisManager = manager
+	logger.Info(ctx, "Redis manager initialized")
+	return nil
+}
+
+// initTracing 初始化链路追踪
+func (f *Framework) initTracing(ctx context.Context) error {
+	if f.config.Tracing == nil {
+		return nil
+	}
+
+	// 如果未设置服务名称，使用应用名称
+	if f.config.Tracing.ServiceName == "" {
+		f.config.Tracing.ServiceName = f.config.App.Name
+	}
+	if f.config.Tracing.ServiceName == "" {
+		f.config.Tracing.ServiceName = "quickgo-service"
+	}
+
+	// 如果未设置服务版本，使用应用版本
+	if f.config.Tracing.ServiceVersion == "" {
+		f.config.Tracing.ServiceVersion = f.config.App.Version
+	}
+	if f.config.Tracing.ServiceVersion == "" {
+		f.config.Tracing.ServiceVersion = "1.0.0"
+	}
+
+	// 如果未设置环境，使用应用环境
+	if f.config.Tracing.Environment == "" {
+		f.config.Tracing.Environment = f.config.App.Env
+	}
+	if f.config.Tracing.Environment == "" {
+		f.config.Tracing.Environment = "development"
+	}
+
+	if err := tracing.Init(f.config.Tracing); err != nil {
+		return fmt.Errorf("failed to initialize tracing: %w", err)
+	}
+
+	logger.Info(ctx, "Tracing initialized: service=%s, version=%s, environment=%s, otlp_enabled=%v, otlp_endpoint=%s",
+		f.config.Tracing.ServiceName,
+		f.config.Tracing.ServiceVersion,
+		f.config.Tracing.Environment,
+		f.config.Tracing.OTLP.Enabled,
+		f.config.Tracing.OTLP.Endpoint,
+	)
+
 	return nil
 }

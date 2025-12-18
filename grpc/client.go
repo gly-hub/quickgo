@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"gly-hub/go-dandelion/quickgo/logger"
+	"gly-hub/go-dandelion/quickgo/tracing"
 )
 
 // Client gRPC客户端封装
@@ -141,14 +142,24 @@ func NewClient(config ClientConfig) (*Client, error) {
 		}))
 	}
 
-	// 添加默认拦截器（日志、链路追踪）
-	options = append(options, grpc.WithChainUnaryInterceptor(
+	// 构建拦截器链
+	unaryInterceptors := []grpc.UnaryClientInterceptor{
 		ClientLoggingInterceptor(),
-	))
-	// 添加流式拦截器
-	options = append(options, grpc.WithChainStreamInterceptor(
+	}
+	streamInterceptors := []grpc.StreamClientInterceptor{
 		ClientStreamLoggingInterceptor(),
-	))
+	}
+
+	// 如果启用了 OpenTelemetry tracing，添加 tracing 拦截器
+	if tracing.IsEnabled() {
+		unaryInterceptors = append([]grpc.UnaryClientInterceptor{tracing.UnaryClientInterceptor()}, unaryInterceptors...)
+		streamInterceptors = append([]grpc.StreamClientInterceptor{tracing.StreamClientInterceptor()}, streamInterceptors...)
+	}
+
+	// 添加默认拦截器（日志、链路追踪）
+	options = append(options, grpc.WithChainUnaryInterceptor(unaryInterceptors...))
+	// 添加流式拦截器
+	options = append(options, grpc.WithChainStreamInterceptor(streamInterceptors...))
 
 	// 添加负载均衡策略
 	if config.LoadBalancing != "" {

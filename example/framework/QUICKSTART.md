@@ -28,6 +28,20 @@ docker run -d --name etcd \
   --listen-client-urls=http://0.0.0.0:2379
 ```
 
+### 2.1 启动 Jaeger（可选，用于链路追踪）
+
+```bash
+docker run -d --name jaeger \
+  -p 6831:6831/udp \
+  -p 16686:16686 \
+  -p 14268:14268 \
+  -p 4317:4317 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+```
+
+访问 Jaeger UI: http://localhost:16686
+
 ## 启动服务
 
 ### 步骤 1: 启动 Auth Server
@@ -118,12 +132,49 @@ curl -X GET http://localhost:8080/api/v1/auth/user/1 \
   -H "Authorization: Bearer <your-token>"
 ```
 
+## 链路追踪
+
+项目已集成 OpenTelemetry 和 Jaeger，支持分布式链路追踪。
+
+### 配置
+
+配置文件中的 `tracing` 部分已配置好，默认使用 OTLP 方式上传到 Jaeger：
+
+```yaml
+tracing:
+  enabled: true
+  serviceName: "auth-server"  # 或 "gateway"
+  serviceVersion: "1.0.0"
+  environment: "local"
+  samplingRate: 1.0
+  otlp:
+    enabled: true
+    endpoint: "http://localhost:4318"
+    useGRPC: false
+    insecure: true
+```
+
+### 查看追踪数据
+
+1. 确保 Jaeger 正在运行（见步骤 2.1）
+2. 访问 http://localhost:16686
+3. 选择服务名称（`auth-server` 或 `gateway`）
+4. 点击 "Find Traces" 查看追踪数据
+
+### 追踪范围
+
+- HTTP 请求（Gateway）
+- gRPC 调用（Server 和 Client）
+- 数据库操作（GORM）
+- Redis 操作（可选）
+
 ## 注意事项
 
 1. **Proto 代码生成**: auth-server 需要先运行 `make proto` 生成代码
 2. **依赖管理**: 运行 `go mod tidy` 更新依赖
 3. **服务顺序**: 先启动 auth-server，再启动 gateway
 4. **etcd 服务**: 确保 etcd 正在运行
+5. **Jaeger 服务**: 如果启用链路追踪，确保 Jaeger 正在运行
 
 ## 项目结构说明
 

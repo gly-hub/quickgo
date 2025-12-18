@@ -2,6 +2,9 @@ package handler
 
 import (
 	"context"
+	"time"
+
+	"gly-hub/go-dandelion/quickgo/db/redis"
 	"gly-hub/go-dandelion/quickgo/example/framework/gateway/internal/service"
 	"gly-hub/go-dandelion/quickgo/logger"
 
@@ -13,6 +16,7 @@ import (
 type AuthHandler struct {
 	authClient *service.AuthClient
 	clientMgr  ClientManager
+	cacheRedis *redis.Client // Redis 缓存客户端（可选）
 }
 
 // ClientManager gRPC 客户端管理器接口
@@ -21,9 +25,12 @@ type ClientManager interface {
 }
 
 // NewAuthHandler 创建认证处理器
-func NewAuthHandler(clientMgr ClientManager) *AuthHandler {
+// clientMgr: gRPC 客户端管理器
+// cacheRedis: Redis 缓存客户端（可选，如果为 nil 则不使用缓存）
+func NewAuthHandler(clientMgr ClientManager, cacheRedis *redis.Client) *AuthHandler {
 	return &AuthHandler{
-		clientMgr: clientMgr,
+		clientMgr:  clientMgr,
+		cacheRedis: cacheRedis,
 	}
 }
 
@@ -44,16 +51,46 @@ func (h *AuthHandler) getAuthClient(ctx context.Context) (*service.AuthClient, e
 	return h.authClient, nil
 }
 
+// getCacheKey 生成缓存键
+func (h *AuthHandler) getCacheKey(key string) string {
+	return "gateway:auth:" + key
+}
+
+// getFromCache 从缓存获取数据
+func (h *AuthHandler) getFromCache(ctx context.Context, key string) (string, error) {
+	if h.cacheRedis == nil {
+		return "", nil // 未配置 Redis，返回空
+	}
+	
+	cacheKey := h.getCacheKey(key)
+	val, err := h.cacheRedis.GetClient().Get(ctx, cacheKey).Result()
+	if err != nil {
+		return "", err
+	}
+	return val, nil
+}
+
+// setCache 设置缓存
+func (h *AuthHandler) setCache(ctx context.Context, key string, value string, ttl time.Duration) error {
+	if h.cacheRedis == nil {
+		return nil // 未配置 Redis，忽略
+	}
+	
+	cacheKey := h.getCacheKey(key)
+	return h.cacheRedis.GetClient().Set(ctx, cacheKey, value, ttl).Err()
+}
+
 // Login 用户登录
 func (h *AuthHandler) Login(c *fiber.Ctx) error {
-	ctx := context.Background()
-
-	// 获取 trace ID
-	traceID := c.Get("X-Trace-ID")
-	if traceID != "" {
-		ctx = logger.WithTraceID(c.Context(), traceID)
-	} else {
-		ctx = logger.StartSpan(c.Context())
+	// 从 tracing middleware 中获取 context（包含 OpenTelemetry span）
+	ctx := c.UserContext()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	
+	// 如果 tracing middleware 存储了 trace_ctx，优先使用它
+	if traceCtx, ok := c.Locals("trace_ctx").(context.Context); ok && traceCtx != nil {
+		ctx = traceCtx
 	}
 
 	// 解析请求体
@@ -110,14 +147,15 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 
 // VerifyToken 验证令牌
 func (h *AuthHandler) VerifyToken(c *fiber.Ctx) error {
-	ctx := context.Background()
-
-	// 获取 trace ID
-	traceID := c.Get("X-Trace-ID")
-	if traceID != "" {
-		ctx = logger.WithTraceID(c.Context(), traceID)
-	} else {
-		ctx = logger.StartSpan(c.Context())
+	// 从 tracing middleware 中获取 context（包含 OpenTelemetry span）
+	ctx := c.UserContext()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	
+	// 如果 tracing middleware 存储了 trace_ctx，优先使用它
+	if traceCtx, ok := c.Locals("trace_ctx").(context.Context); ok && traceCtx != nil {
+		ctx = traceCtx
 	}
 
 	// 从请求头获取令牌
@@ -177,14 +215,15 @@ func (h *AuthHandler) VerifyToken(c *fiber.Ctx) error {
 
 // RefreshToken 刷新令牌
 func (h *AuthHandler) RefreshToken(c *fiber.Ctx) error {
-	ctx := context.Background()
-
-	// 获取 trace ID
-	traceID := c.Get("X-Trace-ID")
-	if traceID != "" {
-		ctx = logger.WithTraceID(c.Context(), traceID)
-	} else {
-		ctx = logger.StartSpan(c.Context())
+	// 从 tracing middleware 中获取 context（包含 OpenTelemetry span）
+	ctx := c.UserContext()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	
+	// 如果 tracing middleware 存储了 trace_ctx，优先使用它
+	if traceCtx, ok := c.Locals("trace_ctx").(context.Context); ok && traceCtx != nil {
+		ctx = traceCtx
 	}
 
 	// 解析请求体
@@ -232,14 +271,15 @@ func (h *AuthHandler) RefreshToken(c *fiber.Ctx) error {
 
 // GetUserInfo 获取用户信息
 func (h *AuthHandler) GetUserInfo(c *fiber.Ctx) error {
-	ctx := context.Background()
-
-	// 获取 trace ID
-	traceID := c.Get("X-Trace-ID")
-	if traceID != "" {
-		ctx = logger.WithTraceID(c.Context(), traceID)
-	} else {
-		ctx = logger.StartSpan(c.Context())
+	// 从 tracing middleware 中获取 context（包含 OpenTelemetry span）
+	ctx := c.UserContext()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	
+	// 如果 tracing middleware 存储了 trace_ctx，优先使用它
+	if traceCtx, ok := c.Locals("trace_ctx").(context.Context); ok && traceCtx != nil {
+		ctx = traceCtx
 	}
 
 	// 从路径参数获取用户ID

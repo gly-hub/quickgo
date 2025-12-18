@@ -23,3 +23,63 @@ grpcServer:
     prefix: "/grpc/services"
     ttl: 30
 
+# GORM 数据库配置
+gorm:
+  databases:
+    # 用户数据库
+    - name: "go-admin"
+      master:
+        type: "mysql"
+        host: "127.0.0.1"
+        port: 3306
+        user: "root"
+        password: "starunion"
+        database: "go-admin"
+        charset: "utf8mb4"
+        timezone: "Local"
+      slaves:
+        - host: "127.0.0.1"
+          port: 3306
+          user: "root"
+          password: "starunion"
+          database: "go-admin"
+          charset: "utf8mb4"
+          timezone: "Local"
+      maxIdleConn: 10
+      maxOpenConn: 100
+      connMaxLifetime: "30m"
+      connMaxIdleTime: "10m"
+      enableLog: true
+      logLevel: "info"
+      slowThreshold: 200
+
+# Redis 配置（用于 token 缓存）
+redis:
+  databases:
+    - name: "token-cache"
+      host: "127.0.0.1"
+      port: 6379
+      password: ""
+      db: 0
+      poolSize: 10
+      minIdleConns: 5
+      maxConnAge: "1h"
+      poolTimeout: "4s"
+      idleTimeout: "5m"
+      dialTimeout: "5s"
+      readTimeout: "3s"
+      writeTimeout: "3s"
+
+# 链路追踪配置（Jaeger）
+tracing:
+  enabled: true
+  serviceName: "auth-server"
+  serviceVersion: "1.0.0"
+  environment: "local"
+  samplingRate: 1.0  # 采样率：1.0 表示采样所有请求
+  otlp:
+    enabled: true
+    endpoint: "http://localhost:4318"  # HTTP 端点（Jaeger 默认 OTLP HTTP 端口）
+    useGRPC: false
+    insecure: true
+

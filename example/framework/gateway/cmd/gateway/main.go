@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"gly-hub/go-dandelion/quickgo"
+	"gly-hub/go-dandelion/quickgo/db/mongodb"
+	"gly-hub/go-dandelion/quickgo/db/redis"
 	"gly-hub/go-dandelion/quickgo/example/framework/gateway/internal/handler"
 	"gly-hub/go-dandelion/quickgo/logger"
+	"gly-hub/go-dandelion/quickgo/tracing"
 
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/grpc"
@@ -25,10 +28,13 @@ func main() {
 
 	// 加载配置到结构体
 	var config = struct {
-		AppConfig        *quickgo.AppConfig        `json:"app" yaml:"app"`
-		LoggerConfig     *quickgo.LoggerConfig     `json:"logger" yaml:"logger"`
-		GrpcClientConfig *quickgo.GrpcClientConfig `json:"grpcClient" yaml:"grpcClient"`
-		HttpServerConfig *quickgo.HTTPServerConfig `json:"httpServer" yaml:"httpServer"`
+		AppConfig        *quickgo.AppConfig          `json:"app" yaml:"app"`
+		LoggerConfig     *quickgo.LoggerConfig       `json:"logger" yaml:"logger"`
+		GrpcClientConfig *quickgo.GrpcClientConfig   `json:"grpcClient" yaml:"grpcClient"`
+		HttpServerConfig *quickgo.HTTPServerConfig   `json:"httpServer" yaml:"httpServer"`
+		RedisConfig      *redis.RedisManagerConfig   `json:"redis" yaml:"redis"`
+		MongoDBConfig    *mongodb.MongoManagerConfig `json:"mongodb" yaml:"mongodb"`
+		TracingConfig    *tracing.Config             `json:"tracing" yaml:"tracing"`
 	}{}
 	quickgo.LoadCustomConfig(&config)
 
@@ -38,6 +44,9 @@ func main() {
 		quickgo.ConfigOptionWithLogger(*config.LoggerConfig),
 		quickgo.ConfigOptionWithGrpcClient(config.GrpcClientConfig),
 		quickgo.ConfigOptionWithHTTPServer(config.HttpServerConfig),
+		quickgo.ConfigOptionWithRedis(config.RedisConfig),
+		quickgo.ConfigOptionWithMongoDB(config.MongoDBConfig),
+		quickgo.ConfigOptionWithTracing(config.TracingConfig),
 		// 如果不需要某个组件，直接注释掉即可，例如：
 		// quickgo.ConfigOptionWithGrpcServer(&grpcServerConfig),
 	)
@@ -57,9 +66,18 @@ func main() {
 
 	// 注册 HTTP 路由
 	if app.HTTPServer() != nil {
+		// 获取 Redis 客户端（如果配置了）
+		var cacheRedis *redis.Client
+		if app.RedisManager() != nil {
+			client, err := app.RedisManager().GetClient("gateway-cache")
+			if err == nil {
+				cacheRedis = client
+			}
+		}
+
 		// 创建认证处理器（需要实现 ClientManager 接口的适配器）
 		clientMgr := &grpcClientManagerAdapter{manager: app.GrpcClientManager()}
-		authHandler := handler.NewAuthHandler(clientMgr)
+		authHandler := handler.NewAuthHandler(clientMgr, cacheRedis)
 
 		// 注册路由
 		app.HTTPServer().RegisterApp(func(fiberApp *fiber.App) {
