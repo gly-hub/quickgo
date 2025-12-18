@@ -11,8 +11,8 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
-	"gly-hub/go-dandelion/quickgo/logger"
-	"gly-hub/go-dandelion/quickgo/tracing"
+	"quickgo/logger"
+	"quickgo/tracing"
 )
 
 // Client gRPC客户端封装
@@ -75,7 +75,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 		case *StaticResolver:
 			scheme = StaticScheme
 		}
-		
+
 		// 如果地址不包含 scheme，添加 scheme
 		if !containsScheme(address) {
 			// 使用服务发现时，地址应该是服务名称
@@ -88,7 +88,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 				scheme = extractedScheme
 			}
 		}
-		
+
 		// 注册 resolver
 		RegisterResolver(scheme, config.ServiceDiscovery)
 	}

@@ -2,7 +2,9 @@ syntax = "proto3";
 
 package auth;
 
-option go_package = "gly-hub/go-dandelion/quickgo/example/framework/auth-server/api/proto/gen;auth";
+import "grpcep/lib.proto";
+
+option go_package = "quickgo/example/framework/auth-server/api/proto/gen;auth";
 
 // AuthService 认证服务
 service AuthService {
@@ -27,12 +29,11 @@ message LoginRequest {
 
 // LoginResponse 登录响应
 message LoginResponse {
-  int32 code = 1;           // 响应码
-  string message = 2;        // 响应消息
-  string token = 3;         // 访问令牌
-  string refresh_token = 4;  // 刷新令牌
-  int64 expires_in = 5;     // 过期时间（秒）
-  UserInfo user_info = 6;   // 用户信息
+  grpcep.CommonResp common_resp = 1;  // 通用响应
+  string token = 2;                   // 访问令牌
+  string refresh_token = 3;            // 刷新令牌
+  int64 expires_in = 4;               // 过期时间（秒）
+  UserInfo user_info = 5;             // 用户信息
 }
 
 // VerifyTokenRequest 验证令牌请求
@@ -42,10 +43,9 @@ message VerifyTokenRequest {
 
 // VerifyTokenResponse 验证令牌响应
 message VerifyTokenResponse {
-  int32 code = 1;        // 响应码
-  string message = 2;     // 响应消息
-  bool valid = 3;         // 是否有效
-  UserInfo user_info = 4; // 用户信息（如果有效）
+  grpcep.CommonResp common_resp = 1;  // 通用响应
+  bool valid = 2;                    // 是否有效
+  UserInfo user_info = 3;            // 用户信息（如果有效）
 }
 
 // RefreshTokenRequest 刷新令牌请求
@@ -55,11 +55,10 @@ message RefreshTokenRequest {
 
 // RefreshTokenResponse 刷新令牌响应
 message RefreshTokenResponse {
-  int32 code = 1;           // 响应码
-  string message = 2;        // 响应消息
-  string token = 3;         // 新的访问令牌
-  string refresh_token = 4; // 新的刷新令牌
-  int64 expires_in = 5;     // 过期时间（秒）
+  grpcep.CommonResp common_resp = 1;  // 通用响应
+  string token = 2;                 // 新的访问令牌
+  string refresh_token = 3;         // 新的刷新令牌
+  int64 expires_in = 4;             // 过期时间（秒）
 }
 
 // GetUserInfoRequest 获取用户信息请求
@@ -69,9 +68,8 @@ message GetUserInfoRequest {
 
 // GetUserInfoResponse 获取用户信息响应
 message GetUserInfoResponse {
-  int32 code = 1;        // 响应码
-  string message = 2;     // 响应消息
-  UserInfo user_info = 3; // 用户信息
+  grpcep.CommonResp common_resp = 1;  // 通用响应
+  UserInfo user_info = 2;             // 用户信息
 }
 
 // UserInfo 用户信息

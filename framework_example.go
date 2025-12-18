@@ -2,7 +2,7 @@ package quickgo
 
 import (
 	"context"
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 
 	rpc "google.golang.org/grpc"
 

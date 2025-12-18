@@ -6,7 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 )
 
 // ExampleBasicServer 基础服务器示例

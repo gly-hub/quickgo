@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"gly-hub/go-dandelion/quickgo"
-	"gly-hub/go-dandelion/quickgo/db/mongodb"
-	"gly-hub/go-dandelion/quickgo/db/redis"
-	"gly-hub/go-dandelion/quickgo/example/framework/gateway/internal/handler"
-	"gly-hub/go-dandelion/quickgo/logger"
-	"gly-hub/go-dandelion/quickgo/tracing"
+	"quickgo"
+	"quickgo/db/mongodb"
+	"quickgo/db/redis"
+	"quickgo/example/framework/gateway/internal/handler"
+	"quickgo/logger"
+	"quickgo/tracing"
 
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/grpc"

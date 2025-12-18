@@ -51,6 +51,13 @@ func Middleware() fiber.Handler {
 		c.Locals("trace_ctx", ctx)
 		// 同时设置到 UserContext（Fiber 的标准方式）
 		c.SetUserContext(ctx)
+		
+		// 提取 trace ID 并存储到 Locals 中（供 http.GetTraceID 使用）
+		traceID := GetTraceIDFromContext(ctx)
+		if traceID != "" {
+			c.Locals("trace_id", traceID)
+			c.Locals("request_id", traceID) // request_id 和 trace_id 使用同一个值
+		}
 
 		// 处理请求
 		err := c.Next()

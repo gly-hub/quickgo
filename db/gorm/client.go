@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"

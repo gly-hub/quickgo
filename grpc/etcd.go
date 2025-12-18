@@ -11,7 +11,7 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 )
 
 const (
@@ -33,10 +33,10 @@ type EtcdConfig struct {
 
 // EtcdResolver etcd 服务发现实现
 type EtcdResolver struct {
-	client      *clientv3.Client
-	prefix      string
-	watchers    map[string]context.CancelFunc
-	mu          sync.RWMutex
+	client   *clientv3.Client
+	prefix   string
+	watchers map[string]context.CancelFunc
+	mu       sync.RWMutex
 }
 
 // NewEtcdResolver 创建 etcd 服务发现
@@ -116,7 +116,7 @@ func (r *EtcdResolver) Watch(ctx context.Context, serviceName string, callback f
 	if cancel, ok := r.watchers[serviceName]; ok {
 		cancel()
 	}
-	
+
 	watchCtx, cancel := context.WithCancel(ctx)
 	r.watchers[serviceName] = cancel
 	r.mu.Unlock()
@@ -342,4 +342,3 @@ func RegisterEtcdResolver(config EtcdConfig) error {
 	RegisterResolver(EtcdScheme, resolver)
 	return nil
 }
-

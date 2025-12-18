@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 
 	redisClient "github.com/redis/go-redis/v9"
 )
@@ -148,7 +148,7 @@ func NewClient(config *RedisConfig) (*Client, error) {
 	// 测试连接（使用带超时的 context，确保不会无限等待）
 	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pingCancel()
-	
+
 	if err := client.Ping(pingCtx).Err(); err != nil {
 		// 连接失败，关闭已创建的客户端
 		client.Close()

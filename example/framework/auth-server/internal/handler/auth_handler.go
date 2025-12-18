@@ -2,9 +2,10 @@ package handler
 
 import (
 	"context"
-	gen "gly-hub/go-dandelion/quickgo/example/framework/auth-server/api/proto/gen/api/proto"
-	"gly-hub/go-dandelion/quickgo/example/framework/auth-server/internal/service"
-	"gly-hub/go-dandelion/quickgo/logger"
+	gen "quickgo/example/framework/auth-server/api/proto/gen"
+	"quickgo/example/framework/auth-server/internal/service"
+	"quickgo/grpcep"
+	"quickgo/logger"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -37,15 +38,23 @@ func (h *AuthHandler) Login(ctx context.Context, req *gen.LoginRequest) (*gen.Lo
 		return nil, status.Error(codes.InvalidArgument, "password is required")
 	}
 
-	resp, err := h.authService.Login(ctx, req.Username, req.Password)
+	resp := &gen.LoginResponse{}
+	grpcep.InitResponse(&resp)
+
+	respResult, err := h.authService.Login(ctx, req.Username, req.Password)
 	if err != nil {
 		logger.Error(ctx, "Login failed: %v", err)
-		return nil, status.Error(codes.Internal, "login failed")
-	}
-
-	if resp.Code != 200 {
+		resp.CommonResp.Code = grpcep.InternalErrCode
+		resp.CommonResp.Msg = "登录失败"
 		return resp, nil
 	}
+
+	// 复制响应数据
+	resp.CommonResp = respResult.CommonResp
+	resp.Token = respResult.Token
+	resp.RefreshToken = respResult.RefreshToken
+	resp.ExpiresIn = respResult.ExpiresIn
+	resp.UserInfo = respResult.UserInfo
 
 	return resp, nil
 }
@@ -56,11 +65,21 @@ func (h *AuthHandler) VerifyToken(ctx context.Context, req *gen.VerifyTokenReque
 		return nil, status.Error(codes.InvalidArgument, "token is required")
 	}
 
-	resp, err := h.authService.VerifyToken(ctx, req.Token)
+	resp := &gen.VerifyTokenResponse{}
+	grpcep.InitResponse(&resp)
+
+	respResult, err := h.authService.VerifyToken(ctx, req.Token)
 	if err != nil {
 		logger.Error(ctx, "VerifyToken failed: %v", err)
-		return nil, status.Error(codes.Internal, "verify token failed")
+		resp.CommonResp.Code = grpcep.InternalErrCode
+		resp.CommonResp.Msg = "验证令牌失败"
+		return resp, nil
 	}
+
+	// 复制响应数据
+	resp.CommonResp = respResult.CommonResp
+	resp.Valid = respResult.Valid
+	resp.UserInfo = respResult.UserInfo
 
 	return resp, nil
 }
@@ -71,11 +90,22 @@ func (h *AuthHandler) RefreshToken(ctx context.Context, req *gen.RefreshTokenReq
 		return nil, status.Error(codes.InvalidArgument, "refresh_token is required")
 	}
 
-	resp, err := h.authService.RefreshToken(ctx, req.RefreshToken)
+	resp := &gen.RefreshTokenResponse{}
+	grpcep.InitResponse(&resp)
+
+	respResult, err := h.authService.RefreshToken(ctx, req.RefreshToken)
 	if err != nil {
 		logger.Error(ctx, "RefreshToken failed: %v", err)
-		return nil, status.Error(codes.Internal, "refresh token failed")
+		resp.CommonResp.Code = grpcep.InternalErrCode
+		resp.CommonResp.Msg = "刷新令牌失败"
+		return resp, nil
 	}
+
+	// 复制响应数据
+	resp.CommonResp = respResult.CommonResp
+	resp.Token = respResult.Token
+	resp.RefreshToken = respResult.RefreshToken
+	resp.ExpiresIn = respResult.ExpiresIn
 
 	return resp, nil
 }
@@ -86,11 +116,20 @@ func (h *AuthHandler) GetUserInfo(ctx context.Context, req *gen.GetUserInfoReque
 		return nil, status.Error(codes.InvalidArgument, "user_id is required")
 	}
 
-	resp, err := h.authService.GetUserInfo(ctx, req.UserId)
+	resp := &gen.GetUserInfoResponse{}
+	grpcep.InitResponse(&resp)
+
+	respResult, err := h.authService.GetUserInfo(ctx, req.UserId)
 	if err != nil {
 		logger.Error(ctx, "GetUserInfo failed: %v", err)
-		return nil, status.Error(codes.Internal, "get user info failed")
+		resp.CommonResp.Code = grpcep.InternalErrCode
+		resp.CommonResp.Msg = "获取用户信息失败"
+		return resp, nil
 	}
+
+	// 复制响应数据
+	resp.CommonResp = respResult.CommonResp
+	resp.UserInfo = respResult.UserInfo
 
 	return resp, nil
 }

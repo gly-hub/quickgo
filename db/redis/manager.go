@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"gly-hub/go-dandelion/quickgo/logger"
 	redisClient "github.com/redis/go-redis/v9"
+	"quickgo/logger"
 )
 
 // Manager Redis 多客户端管理器
@@ -37,7 +37,7 @@ func NewManager(config *RedisManagerConfig) (*Manager, error) {
 		}
 
 		logger.Info(ctx, "Connecting to Redis: name=%s", dbConfig.Name)
-		
+
 		client, err := NewClient(dbConfig)
 		if err != nil {
 			// 连接失败，返回错误，阻止服务启动
@@ -170,4 +170,3 @@ func (m *Manager) Close() error {
 	logger.Info(ctx, "Redis Manager closed successfully")
 	return nil
 }
-

@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 )
 
 // Server gRPC服务器封装
@@ -207,4 +207,3 @@ func (s *Server) SetHealthStatus(service string, status grpc_health_v1.HealthChe
 func (s *Server) IsRunning() bool {
 	return s.listener != nil
 }
-

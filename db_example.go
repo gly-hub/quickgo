@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"gly-hub/go-dandelion/quickgo/db/gorm"
-	"gly-hub/go-dandelion/quickgo/db/mongodb"
-	"gly-hub/go-dandelion/quickgo/db/redis"
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/db/gorm"
+	"quickgo/db/mongodb"
+	"quickgo/db/redis"
+	"quickgo/logger"
 )
 
 // ExampleDatabaseUsage 数据库使用示例

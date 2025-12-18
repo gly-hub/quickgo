@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package grpcep;
+option go_package = "quickgo/grpcep";
+
+message CommonResp {
+  int32 code = 1;
+  string msg = 2;
+}
