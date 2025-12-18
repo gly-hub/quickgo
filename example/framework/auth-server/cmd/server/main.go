@@ -3,13 +3,13 @@ package main
 import (
 	"fmt"
 
-	"gly-hub/go-dandelion/quickgo"
-	"gly-hub/go-dandelion/quickgo/db/gorm"
-	"gly-hub/go-dandelion/quickgo/db/redis"
-	gen "gly-hub/go-dandelion/quickgo/example/framework/auth-server/api/proto/gen/api/proto"
-	"gly-hub/go-dandelion/quickgo/example/framework/auth-server/internal/handler"
-	"gly-hub/go-dandelion/quickgo/example/framework/auth-server/internal/service"
-	"gly-hub/go-dandelion/quickgo/tracing"
+	"quickgo"
+	"quickgo/db/gorm"
+	"quickgo/db/redis"
+	gen "quickgo/example/framework/auth-server/api/proto/gen"
+	"quickgo/example/framework/auth-server/internal/handler"
+	"quickgo/example/framework/auth-server/internal/service"
+	"quickgo/tracing"
 
 	rpc "google.golang.org/grpc"
 	gormDB "gorm.io/gorm"
@@ -47,7 +47,7 @@ func main() {
 	}
 
 	// 初始化所有组件
-	if err := app.Init(); err != nil {
+	if err = app.Init(); err != nil {
 		panic(err)
 	}
 

@@ -6,7 +6,8 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
+	"quickgo/tracing"
 )
 
 const (
@@ -161,9 +162,43 @@ func TimeoutMiddleware(timeout time.Duration) fiber.Handler {
 
 // GetTraceID 从 Fiber context 中获取 trace ID
 func GetTraceID(c *fiber.Ctx) string {
-	if traceID, ok := c.Locals("trace_id").(string); ok {
+	// 1. 优先从 Locals 中获取（由 TraceMiddleware 设置）
+	if traceID, ok := c.Locals("trace_id").(string); ok && traceID != "" {
 		return traceID
 	}
+
+	// 2. 如果使用 OpenTelemetry tracing，从 trace_ctx 中提取 trace ID
+	if traceCtx, ok := c.Locals("trace_ctx").(context.Context); ok && traceCtx != nil {
+		// 尝试从 OpenTelemetry span context 中提取 trace ID
+		if traceID := extractTraceIDFromContext(traceCtx); traceID != "" {
+			return traceID
+		}
+	}
+
+	// 3. 从 UserContext 中提取（Fiber 标准方式）
+	if userCtx := c.UserContext(); userCtx != nil {
+		if traceID := extractTraceIDFromContext(userCtx); traceID != "" {
+			return traceID
+		}
+	}
+
+	return ""
+}
+
+// extractTraceIDFromContext 从 context 中提取 trace ID（支持 OpenTelemetry）
+func extractTraceIDFromContext(ctx context.Context) string {
+	// 1. 优先从 logger context 中获取（由 TraceMiddleware 设置）
+	if traceID := logger.GetTraceID(ctx); traceID != "" {
+		return traceID
+	}
+
+	// 2. 如果启用了 OpenTelemetry tracing，从 span context 中提取
+	if tracing.IsEnabled() {
+		if traceID := tracing.GetTraceIDFromContext(ctx); traceID != "" {
+			return traceID
+		}
+	}
+
 	return ""
 }
 

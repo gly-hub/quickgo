@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 
 	"gorm.io/gorm"
 )

@@ -9,8 +9,10 @@ GEN_DIR := $(PROTO_DIR)/gen
 proto:
 	@echo "Generating Go code from proto..."
 	@mkdir -p $(GEN_DIR)
-	@protoc --go_out=$(GEN_DIR) \
+	@protoc -I../../../ -I$(PROTO_DIR) \
+		--go_out=$(GEN_DIR) \
 		--go_opt=paths=source_relative \
+		--go_opt=Mapi/proto/auth.proto=quickgo/example/framework/auth-server/api/proto/gen \
 		--go-grpc_out=$(GEN_DIR) \
 		--go-grpc_opt=paths=source_relative \
 		$(PROTO_FILE)

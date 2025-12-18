@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"gly-hub/go-dandelion/quickgo/http"
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/http"
+	"quickgo/logger"
 
 	"github.com/gofiber/fiber/v2"
 )

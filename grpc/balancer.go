@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/base"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 )
 
 const (
@@ -122,4 +122,3 @@ func GetLoadBalancingOption(policy LoadBalancingPolicy) grpc.DialOption {
 		return grpc.WithDefaultServiceConfig(fmt.Sprintf(`{"loadBalancingPolicy":"%s"}`, RoundRobinBalancer))
 	}
 }
-

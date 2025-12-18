@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"gly-hub/go-dandelion/quickgo/grpc"
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/grpc"
+	"quickgo/logger"
 	"sync"
 	"time"
 

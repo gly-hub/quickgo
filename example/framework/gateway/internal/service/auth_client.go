@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	gen "gly-hub/go-dandelion/quickgo/example/framework/auth-server/api/proto/gen/api/proto"
-	"gly-hub/go-dandelion/quickgo/logger"
+	gen "quickgo/example/framework/auth-server/api/proto/gen"
+	"quickgo/logger"
 
 	"google.golang.org/grpc"
 )

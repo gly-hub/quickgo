@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/grpc/resolver"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 )
 
 const (
@@ -46,11 +46,11 @@ func NewStaticResolver(addresses []string) *StaticResolver {
 func (r *StaticResolver) Resolve(ctx context.Context, serviceName string) ([]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	
+
 	if len(r.addresses) == 0 {
 		return nil, fmt.Errorf("no addresses available")
 	}
-	
+
 	// 返回地址的副本
 	result := make([]string, len(r.addresses))
 	copy(result, r.addresses)
@@ -210,4 +210,3 @@ func RegisterStaticResolver(addresses []string) {
 	sd := NewStaticResolver(addresses)
 	RegisterResolver(StaticScheme, sd)
 }
-

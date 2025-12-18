@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"time"
 
-	"gly-hub/go-dandelion/quickgo/db/redis"
-	gen "gly-hub/go-dandelion/quickgo/example/framework/auth-server/api/proto/gen/api/proto"
-	"gly-hub/go-dandelion/quickgo/example/framework/auth-server/internal/model"
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/db/redis"
+	gen "quickgo/example/framework/auth-server/api/proto/gen"
+	"quickgo/example/framework/auth-server/internal/model"
+	"quickgo/grpcep"
+	"quickgo/logger"
 
 	gormDB "gorm.io/gorm"
 )
@@ -163,40 +164,40 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 		if err := s.db.WithContext(ctx).Where("username = ? AND status = ?", username, 1).First(userModel).Error; err != nil {
 			if err == gormDB.ErrRecordNotFound {
 				logger.Warn(ctx, "User not found: username=%s", username)
-				return &gen.LoginResponse{
-					Code:    401,
-					Message: "用户名或密码错误",
-				}, nil
+				resp := newLoginResponse()
+				resp.CommonResp.Code = 401
+				resp.CommonResp.Msg = "用户名或密码错误"
+				return resp, nil
 			}
 			logger.Error(ctx, "Failed to query user: %v", err)
-			return &gen.LoginResponse{
-				Code:    500,
-				Message: "查询用户失败",
-			}, nil
+			resp := newLoginResponse()
+			resp.CommonResp.Code = 500
+			resp.CommonResp.Msg = "查询用户失败"
+			return resp, nil
 		}
 
 		// 验证密码（实际应该使用 bcrypt 等哈希比较）
 		if userModel.Password != password {
 			logger.Warn(ctx, "Invalid password: username=%s", username)
-			return &gen.LoginResponse{
-				Code:    401,
-				Message: "用户名或密码错误",
-			}, nil
+			resp := newLoginResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "用户名或密码错误"
+			return resp, nil
 		}
 	} else {
 		// 使用内存存储（向后兼容）
 		user, exists := s.users[username]
 		if !exists {
-			return &gen.LoginResponse{
-				Code:    401,
-				Message: "用户名或密码错误",
-			}, nil
+			resp := newLoginResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "用户名或密码错误"
+			return resp, nil
 		}
 		if user.Password != password {
-			return &gen.LoginResponse{
-				Code:    401,
-				Message: "用户名或密码错误",
-			}, nil
+			resp := newLoginResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "用户名或密码错误"
+			return resp, nil
 		}
 		// 转换为 UserModel 格式
 		userModel = &model.UserModel{
@@ -213,10 +214,10 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 	token, refreshToken, expiresIn, err := s.generateTokens(userModel.UserID)
 	if err != nil {
 		logger.Error(ctx, "Failed to generate tokens: %v", err)
-		return &gen.LoginResponse{
-			Code:    500,
-			Message: "生成令牌失败",
-		}, nil
+		resp := newLoginResponse()
+		resp.CommonResp.Code = grpcep.InternalErrCode
+		resp.CommonResp.Msg = "生成令牌失败"
+		return resp, nil
 	}
 
 	// 存储令牌信息到 Redis 或内存
@@ -230,10 +231,11 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 		// 存储到 Redis
 		if err := s.saveTokenToRedis(ctx, token, tokenInfo, time.Duration(expiresIn)*time.Second); err != nil {
 			logger.Error(ctx, "Failed to save token to Redis: %v", err)
-			return &gen.LoginResponse{
-				Code:    500,
-				Message: "保存令牌失败",
-			}, nil
+			resp := &gen.LoginResponse{}
+			grpcep.InitResponse(&resp)
+			resp.CommonResp.Code = grpcep.InternalErrCode
+			resp.CommonResp.Msg = "保存令牌失败"
+			return resp, nil
 		}
 		// 同时存储 refresh token 映射
 		if err := s.saveRefreshTokenToRedis(ctx, refreshToken, token, time.Duration(expiresIn+3600)*time.Second); err != nil {
@@ -246,21 +248,21 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 
 	logger.Info(ctx, "Login success: username=%s, user_id=%s", username, userModel.UserID)
 
-	return &gen.LoginResponse{
-		Code:         200,
-		Message:      "登录成功",
-		Token:        token,
-		RefreshToken: refreshToken,
-		ExpiresIn:    expiresIn,
-		UserInfo: &gen.UserInfo{
-			UserId:   userModel.UserID,
-			Username: userModel.Username,
-			Email:    userModel.Email,
-			Nickname: userModel.Nickname,
-			Avatar:   userModel.Avatar,
-			Roles:    userModel.GetRoles(),
-		},
-	}, nil
+	resp := newLoginResponse()
+	resp.CommonResp.Code = grpcep.SuccessCode
+	resp.CommonResp.Msg = "登录成功"
+	resp.Token = token
+	resp.RefreshToken = refreshToken
+	resp.ExpiresIn = expiresIn
+	resp.UserInfo = &gen.UserInfo{
+		UserId:   userModel.UserID,
+		Username: userModel.Username,
+		Email:    userModel.Email,
+		Nickname: userModel.Nickname,
+		Avatar:   userModel.Avatar,
+		Roles:    userModel.GetRoles(),
+	}
+	return resp, nil
 }
 
 // VerifyToken 验证令牌
@@ -275,22 +277,22 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 		tokenInfo, err = s.getTokenFromRedis(ctx, token)
 		if err != nil {
 			logger.Warn(ctx, "Token not found in Redis: %v", err)
-			return &gen.VerifyTokenResponse{
-				Code:    401,
-				Message: "令牌无效",
-				Valid:   false,
-			}, nil
+			resp := newVerifyTokenResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "令牌无效"
+			resp.Valid = false
+			return resp, nil
 		}
 	} else {
 		// 从内存获取（向后兼容）
 		var exists bool
 		tokenInfo, exists = s.tokens[token]
 		if !exists {
-			return &gen.VerifyTokenResponse{
-				Code:    401,
-				Message: "令牌无效",
-				Valid:   false,
-			}, nil
+			resp := newVerifyTokenResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "令牌无效"
+			resp.Valid = false
+			return resp, nil
 		}
 	}
 
@@ -302,11 +304,11 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 		} else {
 			delete(s.tokens, token)
 		}
-		return &gen.VerifyTokenResponse{
-			Code:    401,
-			Message: "令牌已过期",
-			Valid:   false,
-		}, nil
+		resp := newVerifyTokenResponse()
+		resp.CommonResp.Code = 401
+		resp.CommonResp.Msg = "令牌已过期"
+		resp.Valid = false
+		return resp, nil
 	}
 
 	// 获取用户信息
@@ -316,28 +318,28 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 		userModel = &model.UserModel{}
 		if err := s.db.Where("user_id = ? AND status = ?", tokenInfo.UserID, 1).First(userModel).Error; err != nil {
 			if err == gormDB.ErrRecordNotFound {
-				return &gen.VerifyTokenResponse{
-					Code:    404,
-					Message: "用户不存在",
-					Valid:   false,
-				}, nil
+				resp := newVerifyTokenResponse()
+				resp.CommonResp.Code = 404
+				resp.CommonResp.Msg = "用户不存在"
+				resp.Valid = false
+				return resp, nil
 			}
 			logger.Error(ctx, "Failed to query user: %v", err)
-			return &gen.VerifyTokenResponse{
-				Code:    500,
-				Message: "查询用户失败",
-				Valid:   false,
-			}, nil
+			resp := newVerifyTokenResponse()
+			resp.CommonResp.Code = 500
+			resp.CommonResp.Msg = "查询用户失败"
+			resp.Valid = false
+			return resp, nil
 		}
 	} else {
 		// 从内存获取（向后兼容）
 		user := s.getUserByID(tokenInfo.UserID)
 		if user == nil {
-			return &gen.VerifyTokenResponse{
-				Code:    404,
-				Message: "用户不存在",
-				Valid:   false,
-			}, nil
+			resp := newVerifyTokenResponse()
+			resp.CommonResp.Code = 404
+			resp.CommonResp.Msg = "用户不存在"
+			resp.Valid = false
+			return resp, nil
 		}
 		userModel = &model.UserModel{
 			UserID:   user.UserID,
@@ -349,19 +351,19 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 		userModel.SetRoles(user.Roles)
 	}
 
-	return &gen.VerifyTokenResponse{
-		Code:    200,
-		Message: "令牌有效",
-		Valid:   true,
-		UserInfo: &gen.UserInfo{
-			UserId:   userModel.UserID,
-			Username: userModel.Username,
-			Email:    userModel.Email,
-			Nickname: userModel.Nickname,
-			Avatar:   userModel.Avatar,
-			Roles:    userModel.GetRoles(),
-		},
-	}, nil
+	resp := newVerifyTokenResponse()
+	resp.CommonResp.Code = 200
+	resp.CommonResp.Msg = "令牌有效"
+	resp.Valid = true
+	resp.UserInfo = &gen.UserInfo{
+		UserId:   userModel.UserID,
+		Username: userModel.Username,
+		Email:    userModel.Email,
+		Nickname: userModel.Nickname,
+		Avatar:   userModel.Avatar,
+		Roles:    userModel.GetRoles(),
+	}
+	return resp, nil
 }
 
 // RefreshToken 刷新令牌
@@ -378,19 +380,19 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 		token, err = s.getTokenByRefreshTokenFromRedis(ctx, refreshToken)
 		if err != nil {
 			logger.Warn(ctx, "Refresh token not found in Redis: %v", err)
-			return &gen.RefreshTokenResponse{
-				Code:    401,
-				Message: "刷新令牌无效",
-			}, nil
+			resp := newRefreshTokenResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "刷新令牌无效"
+			return resp, nil
 		}
 		// 获取 token 信息
 		tokenInfo, err = s.getTokenFromRedis(ctx, token)
 		if err != nil {
 			logger.Warn(ctx, "Token not found in Redis: %v", err)
-			return &gen.RefreshTokenResponse{
-				Code:    401,
-				Message: "刷新令牌无效",
-			}, nil
+			resp := newRefreshTokenResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "刷新令牌无效"
+			return resp, nil
 		}
 	} else {
 		// 从内存查找（向后兼容）
@@ -404,10 +406,10 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 			}
 		}
 		if !found {
-			return &gen.RefreshTokenResponse{
-				Code:    401,
-				Message: "刷新令牌无效",
-			}, nil
+			resp := newRefreshTokenResponse()
+			resp.CommonResp.Code = 401
+			resp.CommonResp.Msg = "刷新令牌无效"
+			return resp, nil
 		}
 	}
 
@@ -418,25 +420,25 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 		userModel = &model.UserModel{}
 		if err := s.db.Where("user_id = ? AND status = ?", tokenInfo.UserID, 1).First(userModel).Error; err != nil {
 			if err == gormDB.ErrRecordNotFound {
-				return &gen.RefreshTokenResponse{
-					Code:    404,
-					Message: "用户不存在",
-				}, nil
+				resp := newRefreshTokenResponse()
+				resp.CommonResp.Code = 404
+				resp.CommonResp.Msg = "用户不存在"
+				return resp, nil
 			}
 			logger.Error(ctx, "Failed to query user: %v", err)
-			return &gen.RefreshTokenResponse{
-				Code:    500,
-				Message: "查询用户失败",
-			}, nil
+			resp := newRefreshTokenResponse()
+			resp.CommonResp.Code = 500
+			resp.CommonResp.Msg = "查询用户失败"
+			return resp, nil
 		}
 	} else {
 		// 从内存获取（向后兼容）
 		user := s.getUserByID(tokenInfo.UserID)
 		if user == nil {
-			return &gen.RefreshTokenResponse{
-				Code:    404,
-				Message: "用户不存在",
-			}, nil
+			resp := newRefreshTokenResponse()
+			resp.CommonResp.Code = 404
+			resp.CommonResp.Msg = "用户不存在"
+			return resp, nil
 		}
 		userModel = &model.UserModel{
 			UserID:   user.UserID,
@@ -456,10 +458,10 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 	newToken, newRefreshToken, expiresIn, err := s.generateTokens(userModel.UserID)
 	if err != nil {
 		logger.Error(ctx, "Failed to generate tokens: %v", err)
-		return &gen.RefreshTokenResponse{
-			Code:    500,
-			Message: "生成令牌失败",
-		}, nil
+		resp := newRefreshTokenResponse()
+		resp.CommonResp.Code = 500
+		resp.CommonResp.Msg = "生成令牌失败"
+		return resp, nil
 	}
 
 	// 存储新令牌
@@ -473,10 +475,10 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 		// 存储到 Redis
 		if err := s.saveTokenToRedis(ctx, newToken, newTokenInfo, time.Duration(expiresIn)*time.Second); err != nil {
 			logger.Error(ctx, "Failed to save token to Redis: %v", err)
-			return &gen.RefreshTokenResponse{
-				Code:    500,
-				Message: "保存令牌失败",
-			}, nil
+			resp := newRefreshTokenResponse()
+			resp.CommonResp.Code = 500
+			resp.CommonResp.Msg = "保存令牌失败"
+			return resp, nil
 		}
 		// 存储 refresh token 映射
 		if err := s.saveRefreshTokenToRedis(ctx, newRefreshToken, newToken, time.Duration(expiresIn+3600)*time.Second); err != nil {
@@ -487,13 +489,13 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 		s.tokens[newToken] = newTokenInfo
 	}
 
-	return &gen.RefreshTokenResponse{
-		Code:         200,
-		Message:      "刷新成功",
-		Token:        newToken,
-		RefreshToken: newRefreshToken,
-		ExpiresIn:    expiresIn,
-	}, nil
+	resp := newRefreshTokenResponse()
+	resp.CommonResp.Code = 200
+	resp.CommonResp.Msg = "刷新成功"
+	resp.Token = newToken
+	resp.RefreshToken = newRefreshToken
+	resp.ExpiresIn = expiresIn
+	return resp, nil
 }
 
 // GetUserInfo 获取用户信息
@@ -507,25 +509,25 @@ func (s *AuthService) GetUserInfo(ctx context.Context, userID string) (*gen.GetU
 		userModel = &model.UserModel{}
 		if err := s.db.Where("user_id = ? AND status = ?", userID, 1).First(userModel).Error; err != nil {
 			if err == gormDB.ErrRecordNotFound {
-				return &gen.GetUserInfoResponse{
-					Code:    404,
-					Message: "用户不存在",
-				}, nil
+				resp := newGetUserInfoResponse()
+				resp.CommonResp.Code = 404
+				resp.CommonResp.Msg = "用户不存在"
+				return resp, nil
 			}
 			logger.Error(ctx, "Failed to query user: %v", err)
-			return &gen.GetUserInfoResponse{
-				Code:    500,
-				Message: "查询用户失败",
-			}, nil
+			resp := newGetUserInfoResponse()
+			resp.CommonResp.Code = 500
+			resp.CommonResp.Msg = "查询用户失败"
+			return resp, nil
 		}
 	} else {
 		// 从内存获取（向后兼容）
 		user := s.getUserByID(userID)
 		if user == nil {
-			return &gen.GetUserInfoResponse{
-				Code:    404,
-				Message: "用户不存在",
-			}, nil
+			resp := newGetUserInfoResponse()
+			resp.CommonResp.Code = 404
+			resp.CommonResp.Msg = "用户不存在"
+			return resp, nil
 		}
 		userModel = &model.UserModel{
 			UserID:   user.UserID,
@@ -537,18 +539,18 @@ func (s *AuthService) GetUserInfo(ctx context.Context, userID string) (*gen.GetU
 		userModel.SetRoles(user.Roles)
 	}
 
-	return &gen.GetUserInfoResponse{
-		Code:    200,
-		Message: "获取成功",
-		UserInfo: &gen.UserInfo{
-			UserId:   userModel.UserID,
-			Username: userModel.Username,
-			Email:    userModel.Email,
-			Nickname: userModel.Nickname,
-			Avatar:   userModel.Avatar,
-			Roles:    userModel.GetRoles(),
-		},
-	}, nil
+	resp := newGetUserInfoResponse()
+	resp.CommonResp.Code = 200
+	resp.CommonResp.Msg = "获取成功"
+	resp.UserInfo = &gen.UserInfo{
+		UserId:   userModel.UserID,
+		Username: userModel.Username,
+		Email:    userModel.Email,
+		Nickname: userModel.Nickname,
+		Avatar:   userModel.Avatar,
+		Roles:    userModel.GetRoles(),
+	}
+	return resp, nil
 }
 
 // generateTokens 生成令牌

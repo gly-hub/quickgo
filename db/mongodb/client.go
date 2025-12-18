@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"gly-hub/go-dandelion/quickgo/logger"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"quickgo/logger"
 )
 
 // Client MongoDB 客户端封装
@@ -51,7 +51,7 @@ func NewClient(config *MongoConfig) (*Client, error) {
 	if config.MinPoolSize > 0 {
 		clientOptions.SetMinPoolSize(config.MinPoolSize)
 	}
-	
+
 	// 解析并设置连接最大空闲时间
 	if config.MaxConnIdleTime != "" {
 		maxConnIdleTime, err := time.ParseDuration(config.MaxConnIdleTime)
@@ -62,7 +62,7 @@ func NewClient(config *MongoConfig) (*Client, error) {
 			clientOptions.SetMaxConnIdleTime(maxConnIdleTime)
 		}
 	}
-	
+
 	// 解析并设置连接超时时间
 	if config.ConnectTimeout != "" {
 		connectTimeout, err := time.ParseDuration(config.ConnectTimeout)
@@ -73,7 +73,7 @@ func NewClient(config *MongoConfig) (*Client, error) {
 			clientOptions.SetConnectTimeout(connectTimeout)
 		}
 	}
-	
+
 	// 解析并设置 Socket 超时时间
 	if config.SocketTimeout != "" {
 		socketTimeout, err := time.ParseDuration(config.SocketTimeout)
@@ -99,7 +99,7 @@ func NewClient(config *MongoConfig) (*Client, error) {
 	// 测试连接（使用带超时的 context，确保不会无限等待）
 	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pingCancel()
-	
+
 	if err := client.Ping(pingCtx, nil); err != nil {
 		// 连接失败，关闭已创建的客户端
 		client.Disconnect(ctx)
@@ -221,4 +221,3 @@ func buildURI(config *MongoConfig) (string, error) {
 
 	return uri, nil
 }
-

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	frameworkLogger "gly-hub/go-dandelion/quickgo/logger"
-	"gly-hub/go-dandelion/quickgo/tracing"
+	frameworkLogger "quickgo/logger"
+	"quickgo/tracing"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"gly-hub/go-dandelion/quickgo/logger"
+	"quickgo/logger"
 )
 
 // ServiceRegistry 服务注册接口
@@ -124,14 +124,14 @@ func parseInt(v interface{}) (int, error) {
 
 // ServiceRegistrar 服务注册器（用于服务端自动注册）
 type ServiceRegistrar struct {
-	registry     ServiceRegistry
-	serviceName  string
-	address      string
-	metadata     map[string]string
+	registry        ServiceRegistry
+	serviceName     string
+	address         string
+	metadata        map[string]string
 	keepAliveTicker *time.Ticker
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mu           sync.Mutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	mu              sync.Mutex
 }
 
 // NewServiceRegistrar 创建服务注册器
@@ -207,4 +207,3 @@ func (sr *ServiceRegistrar) Close() error {
 	sr.cancel()
 	return sr.registry.Close()
 }
-
