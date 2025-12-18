@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/team-dandelion/github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
