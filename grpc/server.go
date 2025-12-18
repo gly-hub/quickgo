@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 // Server gRPC服务器封装

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"quickgo/grpc"
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/grpc"
+	"github.com/team-dandelion/quickgo/logger"
 	"sync"
 	"time"
 

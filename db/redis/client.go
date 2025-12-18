@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 
 	redisClient "github.com/redis/go-redis/v9"
 )

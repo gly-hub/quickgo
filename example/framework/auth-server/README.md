@@ -1,6 +1,6 @@
 # Auth Server - 认证服务
 
-这是一个使用 QuickGo 框架实现的 gRPC 认证服务示例。
+这是一个使用 github.com/team-dandelion/quickgo 框架实现的 gRPC 认证服务示例。
 
 ## 项目结构
 

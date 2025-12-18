@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/team-dandelion/quickgo/logger"
 	"go.mongodb.org/mongo-driver/mongo"
-	"quickgo/logger"
 )
 
 // Manager MongoDB 多客户端管理器

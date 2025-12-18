@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 // ExampleUsage 使用示例

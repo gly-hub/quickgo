@@ -6,7 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/logger"
 )
 
 // ExampleBasicServer 基础服务器示例

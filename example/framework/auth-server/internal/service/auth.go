@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"time"
 
-	"quickgo/db/redis"
-	gen "quickgo/example/framework/auth-server/api/proto/gen"
-	"quickgo/example/framework/auth-server/internal/model"
-	"quickgo/grpcep"
-	"quickgo/logger"
+	"github.com/team-dandelion/quickgo/db/redis"
+	gen "github.com/team-dandelion/quickgo/example/framework/auth-server/api/proto/gen"
+	"github.com/team-dandelion/quickgo/example/framework/auth-server/internal/model"
+	"github.com/team-dandelion/quickgo/grpcep"
+	"github.com/team-dandelion/quickgo/logger"
 
 	gormDB "gorm.io/gorm"
 )
