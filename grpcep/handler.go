@@ -3,10 +3,10 @@ package grpcep
 import (
 	"context"
 	"errors"
-	"quickgo/gerr"
-	"quickgo/http"
-	"quickgo/logger"
-	"quickgo/tracing"
+	"github.com/team-dandelion/quickgo/gerr"
+	"github.com/team-dandelion/quickgo/http"
+	"github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/tracing"
 	"reflect"
 
 	jsoniter "github.com/json-iterator/go"
