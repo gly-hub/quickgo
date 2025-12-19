@@ -129,7 +129,7 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 	switch {
 	case err != nil && l.logLevel >= logger.Error:
 		// 错误日志
-		frameworkLogger.Error(ctx, "[GORM] [%.3fms] [rows:%d] %s | error: %v",
+		frameworkLogger.Error(ctx, "[GORM] [%.3fms] [rows:%d] %s",
 			float64(elapsed.Nanoseconds())/1e6, rows, sql, err)
 	case elapsed > l.slowThreshold && l.slowThreshold != 0 && l.logLevel >= logger.Warn:
 		// 慢查询日志
