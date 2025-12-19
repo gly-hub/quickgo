@@ -3,11 +3,12 @@ package grpcep
 import (
 	"context"
 	"errors"
+	"reflect"
+
 	"github.com/team-dandelion/quickgo/gerr"
 	"github.com/team-dandelion/quickgo/http"
 	"github.com/team-dandelion/quickgo/logger"
 	"github.com/team-dandelion/quickgo/tracing"
-	"reflect"
 
 	jsoniter "github.com/json-iterator/go"
 
@@ -63,7 +64,7 @@ func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interf
 }
 
 func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string {
-	// 先尝试解析为 map，检查是否包含 CommonResp 或 code/message 字段
+	// 先尝试解析为 map，检查是否包含 CommonResp 或 common_resp 字段
 	var dataMap map[string]interface{}
 	var code int32 = SuccessCode
 	var msg string = SuccessDesc
@@ -72,7 +73,7 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 
 	if err := jsoniter.Unmarshal(byteData, &dataMap); err == nil {
 		// 成功解析为 map，检查是否存在 CommonResp 字段
-		if commonRespVal, exists := dataMap[CommonRespKey]; exists {
+		if commonRespVal, exists := dataMap["CommonResp"]; exists {
 			hasCommonResp = true
 			// 解析 CommonResp
 			if commonRespMap, ok := commonRespVal.(map[string]interface{}); ok {
@@ -84,7 +85,21 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 				}
 			}
 			// 移除 CommonResp 字段，因为它不应该出现在最终的 data 中
-			delete(dataMap, CommonRespKey)
+			delete(dataMap, "CommonResp")
+		} else if commonRespVal, exists := dataMap["common_resp"]; exists {
+			// 检查是否存在 common_resp 字段（小写版本）
+			hasCommonResp = true
+			// 解析 common_resp
+			if commonRespMap, ok := commonRespVal.(map[string]interface{}); ok {
+				if codeVal, ok := commonRespMap["code"].(float64); ok {
+					code = int32(codeVal)
+				}
+				if msgVal, ok := commonRespMap["msg"].(string); ok {
+					msg = msgVal
+				}
+			}
+			// 移除 common_resp 字段，因为它不应该出现在最终的 data 中
+			delete(dataMap, "common_resp")
 		} else {
 			// 如果没有 CommonResp，检查是否有 code 和 message 字段（proto 响应格式）
 			if codeVal, exists := dataMap["code"]; exists {

@@ -11,9 +11,18 @@ func InitResponse(in interface{}) {
 
 	v := reflect.New(rt)
 	dataPointer := v.Pointer()
-	status, exists := rt.FieldByName(CommonRespKey)
+
+	// 首先尝试查找 common_resp 字段
+	status, exists := rt.FieldByName("common_resp")
 	if !exists {
-		panic("`CommonResp` field not found")
+		// 如果没有找到 common_resp，尝试查找 CommonResp 字段
+		status, exists = rt.FieldByName("CommonResp")
+		if !exists {
+			// 如果都没有找到，直接返回，不设置元数据字段
+			iPointer := *(*Iface)(unsafe.Pointer(&in))
+			*(*uintptr)(iPointer.Value) = dataPointer
+			return
+		}
 	}
 
 	*(**CommonResp)((unsafe.Pointer)(dataPointer + status.Offset)) = &CommonResp{

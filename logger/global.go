@@ -28,10 +28,11 @@ func SetDefault(logger *Logger) {
 // GetDefault 获取默认日志记录器
 func GetDefault() *Logger {
 	if defaultLogger == nil {
-		// 如果没有初始化，创建一个默认的
+		// 如果没有初始化，创建一个默认的，使用动态调用者检测
 		defaultLogger, _ = NewLogger(Config{
-			Level:   LevelInfo,
-			Service: "default",
+			Level:      LevelInfo,
+			Service:    "default",
+			CallerSkip: 0, // 0 表示使用动态检测
 		})
 	}
 	return defaultLogger

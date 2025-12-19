@@ -8,7 +8,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
+)
+
+// 用于缓存包名的变量
+var (
+	loggerPackage     string
+	callerInitOnce    sync.Once
+	maximumCallDepth  = 25
+	knownLoggerFrames = 4
 )
 
 // Level 日志级别
@@ -46,7 +55,7 @@ type Config struct {
 	Output     string // 输出文件路径，空则输出到 stdout
 	Service    string // 服务名称
 	Version    string // 服务版本
-	CallerSkip int    // 调用栈跳过层数，默认 2
+	CallerSkip int    // 调用栈跳过层数，0表示使用动态检测
 }
 
 // LogEntry 日志条目
@@ -65,15 +74,7 @@ type LogEntry struct {
 
 // NewLogger 创建新的日志记录器
 func NewLogger(config Config) (*Logger, error) {
-	if config.CallerSkip == 0 {
-		// 默认 skip 为 2，因为：
-		// skip 0 = runtime.Caller 自己
-		// skip 1 = log() 方法
-		// skip 2 = Info()/Debug()/Warn()/Error()/Fatal() 方法
-		// skip 3 = 用户代码（实际调用位置）
-		// 在 log() 方法中会 +1，所以这里设置为 2，实际会跳过 3 层
-		config.CallerSkip = 2
-	}
+	// CallerSkip 为 0 表示使用动态检测，不需要设置默认值
 
 	logger := &Logger{
 		level:      config.Level,
@@ -152,22 +153,26 @@ func (l *Logger) log(ctx context.Context, level Level, msg string, err error, fi
 	caller := ""
 	callerShort := "" // 用于控制台显示的简短格式
 
-	// 使用 callerSkip + 1 来跳过 log() 方法
-	// 默认 callerSkip = 2，所以实际 skip = 3
-	skip := l.callerSkip + 1
+	// 获取调用者信息
+	var pc uintptr
+	var file string
+	var line int
 
-	// 检查 skip 3 的位置是否是 logger 包内的函数（可能是全局函数）
-	// 如果是，则使用 skip 4 来获取真正的用户代码位置
-	if pc, file, line, ok := runtime.Caller(skip); ok {
-		// 检查是否是 logger 包内的非测试文件（可能是全局函数）
-		if strings.Contains(file, "/logger/") && !strings.Contains(file, "_test.go") && !strings.Contains(file, "example.go") {
-			// 可能是全局函数，尝试 skip 4
-			if pc2, file2, line2, ok2 := runtime.Caller(skip + 1); ok2 {
-				pc, file, line = pc2, file2, line2
-			}
+	if l.callerSkip > 0 {
+		// 使用固定的跳过层级
+		skip := l.callerSkip + 1
+		var ok bool
+		pc, file, line, ok = runtime.Caller(skip)
+		if !ok {
+			pc, file, line = 0, "", 0
 		}
+	} else {
+		// 使用动态检测
+		pc, file, line = getCaller()
+	}
 
-		// 获取函数信息
+	// 获取函数信息
+	if pc != 0 {
 		fn := runtime.FuncForPC(pc)
 		if fn != nil {
 			funcName := fn.Name()
@@ -304,6 +309,9 @@ func (l *Logger) Error(ctx context.Context, format string, args ...interface{}) 
 		} else if err == nil {
 			// 如果没有格式化参数且没有 error，直接使用 format
 			msg = format
+		} else if err != nil && len(args) == 0 {
+			msg = fmt.Sprintf(format, err)
+			err = nil // 清除 error，因为我们已经在消息中包含了它
 		}
 	}
 	l.log(ctx, LevelError, msg, err, nil)
@@ -328,6 +336,9 @@ func (l *Logger) Fatal(ctx context.Context, format string, args ...interface{}) 
 		} else if err == nil {
 			// 如果没有格式化参数且没有 error，直接使用 format
 			msg = format
+		} else if err != nil && len(args) == 0 {
+			msg = fmt.Sprintf(format, err)
+			err = nil // 清除 error，因为我们已经在消息中包含了它
 		}
 	}
 	l.log(ctx, LevelFatal, msg, err, nil)
@@ -380,4 +391,76 @@ func getProjectRoot() string {
 
 	// 如果找不到 go.mod，返回当前工作目录
 	return wd
+}
+
+// getPackageName reduces a fully qualified function name to the package name
+func getPackageName(f string) string {
+	for {
+		lastPeriod := strings.LastIndex(f, ".")
+		lastSlash := strings.LastIndex(f, "/")
+		if lastPeriod > lastSlash {
+			f = f[:lastPeriod]
+		} else {
+			break
+		}
+	}
+	return f
+}
+
+// getCaller retrieves the name of the first non-framework calling function
+func getCaller() (uintptr, string, int) {
+	// cache this package's fully-qualified name
+	callerInitOnce.Do(func() {
+		pcs := make([]uintptr, maximumCallDepth)
+		_ = runtime.Callers(0, pcs)
+
+		// dynamic get the package name and the minimum caller depth
+		for i := 0; i < maximumCallDepth; i++ {
+			funcName := runtime.FuncForPC(pcs[i]).Name()
+			if strings.Contains(funcName, "getCaller") {
+				loggerPackage = getPackageName(funcName)
+				break
+			}
+		}
+	})
+
+	// Restrict the lookback frames to avoid runaway lookups
+	pcs := make([]uintptr, maximumCallDepth)
+	depth := runtime.Callers(knownLoggerFrames, pcs)
+	frames := runtime.CallersFrames(pcs[:depth])
+
+	// Known framework packages to exclude
+	frameworkPackages := []string{
+		"github.com/team-dandelion/quickgo",
+		"google.golang.org/grpc",
+		"github.com/spf13/cobra",
+		"go.opentelemetry.io",
+		"gorm.io",
+	}
+
+	for f, again := frames.Next(); again; f, again = frames.Next() {
+		pkg := getPackageName(f.Function)
+
+		// Check if this is the logger package
+		if pkg == loggerPackage {
+			continue
+		}
+
+		// Check if this is a framework package
+		isFramework := false
+		for _, frameworkPkg := range frameworkPackages {
+			if strings.Contains(pkg, frameworkPkg) || strings.Contains(f.File, frameworkPkg) {
+				isFramework = true
+				break
+			}
+		}
+
+		// If the caller isn't part of framework packages, we're done
+		if !isFramework {
+			return f.PC, f.File, f.Line
+		}
+	}
+
+	// if we got here, we failed to find the caller's context
+	return 0, "", 0
 }
