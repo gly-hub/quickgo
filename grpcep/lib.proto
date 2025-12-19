@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package grpcep;
-option go_package = "github.com/team-dandelion/quickgo/grpcep";
+option go_package = "./;grpcep";
 
 message CommonResp {
   int32 code = 1;
