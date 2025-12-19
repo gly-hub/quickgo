@@ -9,4 +9,4 @@ import (
 // which forces Go to include it in vendor directories.
 //
 //go:embed grpcep/lib.proto
-var libProto []byte
+var libProto string
