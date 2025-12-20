@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/team-dandelion/quickgo/grpcep"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -58,6 +59,12 @@ func LoggingInterceptor() grpc.UnaryServerInterceptor {
 			logger.Error(ctx, "gRPC call failed: method=%s, duration=%v", info.FullMethod, duration, err)
 		} else {
 			logger.Info(ctx, "gRPC call success: method=%s, duration=%v", info.FullMethod, duration)
+		}
+
+		if err != nil {
+			if ok = grpcep.WithError(resp, err); ok {
+				err = nil
+			}
 		}
 
 		return resp, err

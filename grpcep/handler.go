@@ -73,7 +73,7 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 
 	if err := jsoniter.Unmarshal(byteData, &dataMap); err == nil {
 		// 成功解析为 map，检查是否存在 CommonResp 字段
-		if commonRespVal, exists := dataMap["CommonResp"]; exists {
+		if commonRespVal, exists := dataMap[CommonRespKey]; exists {
 			hasCommonResp = true
 			// 解析 CommonResp
 			if commonRespMap, ok := commonRespVal.(map[string]interface{}); ok {
@@ -85,8 +85,8 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 				}
 			}
 			// 移除 CommonResp 字段，因为它不应该出现在最终的 data 中
-			delete(dataMap, "CommonResp")
-		} else if commonRespVal, exists := dataMap["common_resp"]; exists {
+			delete(dataMap, CommonRespKey)
+		} else if commonRespVal, exists := dataMap[CommonRespKeyV2]; exists {
 			// 检查是否存在 common_resp 字段（小写版本）
 			hasCommonResp = true
 			// 解析 common_resp
@@ -99,7 +99,7 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 				}
 			}
 			// 移除 common_resp 字段，因为它不应该出现在最终的 data 中
-			delete(dataMap, "common_resp")
+			delete(dataMap, CommonRespKeyV2)
 		} else {
 			// 如果没有 CommonResp，检查是否有 code 和 message 字段（proto 响应格式）
 			if codeVal, exists := dataMap["code"]; exists {
