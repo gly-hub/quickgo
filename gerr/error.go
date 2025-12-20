@@ -25,3 +25,16 @@ func NewGErr(code int32, msg string) *GErr {
 		Msg:  msg,
 	}
 }
+
+func Parse(err error) *GErr {
+	if err == nil {
+		return nil
+	}
+	if e, ok := err.(*GErr); ok {
+		return e
+	}
+	return &GErr{
+		Code: 0,
+		Msg:  err.Error(),
+	}
+}

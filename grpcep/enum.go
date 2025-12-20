@@ -1,8 +1,8 @@
 package grpcep
 
-
 const (
-	CommonRespKey = "CommonResp"
+	CommonRespKey   = "CommonResp"
+	CommonRespKeyV2 = "common_resp"
 )
 
 const (
