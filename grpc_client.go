@@ -7,6 +7,7 @@ import (
 	"github.com/team-dandelion/quickgo/grpc"
 	"github.com/team-dandelion/quickgo/logger"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	rpc "google.golang.org/grpc"
@@ -26,6 +27,8 @@ type GrpcClientConfig struct {
 	PermitWithoutStream bool `json:"permitWithoutStream" yaml:"permitWithoutStream" toml:"permitWithoutStream"`
 	// 负载均衡策略：round_robin, pick_first, weighted_round_robin
 	LoadBalancing string `json:"loadBalancing" yaml:"loadBalancing" toml:"loadBalancing"`
+	// 连接池大小（每个服务的连接数，默认为 1，建议设置为 2-4 以避免 HTTP/2 HPACK 并发问题）
+	PoolSize int `json:"poolSize" yaml:"poolSize" toml:"poolSize"`
 	// Etcd 配置（使用 etcd 服务发现时必需，全局共享）
 	Etcd *EtcdConfig `json:"etcd" yaml:"etcd" toml:"etcd"`
 }
@@ -33,11 +36,18 @@ type GrpcClientConfig struct {
 // GrpcClientManager gRPC 客户端管理器
 // 用于管理多个 gRPC 服务客户端，适合网关场景
 type GrpcClientManager struct {
-	clients      map[string]*grpc.Client // 服务名称 -> 客户端
-	services     map[string]string       // 服务名称 -> 服务名称（用于记录已注册的服务）
-	globalConfig *GrpcClientConfig       // 全局配置（所有服务共享）
-	etcdResolver *grpc.EtcdResolver      // 共享的 etcd resolver
+	clientPools  map[string]*clientPool   // 服务名称 -> 连接池
+	services     map[string]string        // 服务名称 -> 服务名称（用于记录已注册的服务）
+	globalConfig *GrpcClientConfig        // 全局配置（所有服务共享）
+	etcdResolver *grpc.EtcdResolver       // 共享的 etcd resolver
 	mu           sync.RWMutex
+}
+
+// clientPool 连接池
+type clientPool struct {
+	clients []*grpc.Client // 连接池中的客户端
+	index   uint64         // 轮询索引（使用原子操作）
+	mu      sync.RWMutex
 }
 
 // NewGrpcClientManager 创建 gRPC 客户端管理器
@@ -47,8 +57,13 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 		return nil, errors.New("config is nil")
 	}
 
+	// 设置默认连接池大小
+	if config.PoolSize <= 0 {
+		config.PoolSize = 1
+	}
+
 	manager := &GrpcClientManager{
-		clients:      make(map[string]*grpc.Client),
+		clientPools:  make(map[string]*clientPool),
 		services:     make(map[string]string),
 		globalConfig: config,
 	}
@@ -96,24 +111,30 @@ func (m *GrpcClientManager) RegisterService(serviceName string) error {
 	return nil
 }
 
-// GetClient 获取客户端连接（如果不存在则创建并连接）
+// GetClient 获取客户端连接（从连接池中轮询获取）
 // serviceName: 服务名称
 func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (*grpc.Client, error) {
 	m.mu.RLock()
-	client, exists := m.clients[serviceName]
+	pool, exists := m.clientPools[serviceName]
 	m.mu.RUnlock()
 
-	if exists && client != nil && client.IsConnected() {
-		return client, nil
+	if exists && pool != nil {
+		client := pool.getClient()
+		if client != nil && client.IsConnected() {
+			return client, nil
+		}
 	}
 
-	// 需要创建新客户端
+	// 需要创建新连接池
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// 双重检查
-	if client, exists := m.clients[serviceName]; exists && client != nil && client.IsConnected() {
-		return client, nil
+	if pool, exists := m.clientPools[serviceName]; exists && pool != nil {
+		client := pool.getClient()
+		if client != nil && client.IsConnected() {
+			return client, nil
+		}
 	}
 
 	// 检查服务是否已注册
@@ -121,22 +142,17 @@ func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (
 		return nil, fmt.Errorf("service not registered: %s", serviceName)
 	}
 
-	// 创建客户端（使用全局配置和服务名称）
-	client, err := m.createClient(serviceName)
+	// 创建连接池
+	pool, err := m.createClientPool(ctx, serviceName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create client for service %s: %w", serviceName, err)
+		return nil, fmt.Errorf("failed to create client pool for service %s: %w", serviceName, err)
 	}
 
-	// 连接
-	if err := client.Connect(ctx); err != nil {
-		return nil, fmt.Errorf("failed to connect to service %s: %w", serviceName, err)
-	}
+	// 保存连接池
+	m.clientPools[serviceName] = pool
+	logger.Info(ctx, "Created gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
 
-	// 保存客户端
-	m.clients[serviceName] = client
-	logger.Info(ctx, "Created and connected gRPC client: service=%s", serviceName)
-
-	return client, nil
+	return pool.getClient(), nil
 }
 
 // GetConn 获取服务连接（便捷方法）
@@ -223,6 +239,74 @@ func (m *GrpcClientManager) createClient(serviceName string) (*grpc.Client, erro
 	return client, nil
 }
 
+// createClientPool 创建连接池（内部方法）
+func (m *GrpcClientManager) createClientPool(ctx context.Context, serviceName string) (*clientPool, error) {
+	poolSize := m.globalConfig.PoolSize
+	if poolSize <= 0 {
+		poolSize = 1
+	}
+
+	pool := &clientPool{
+		clients: make([]*grpc.Client, 0, poolSize),
+	}
+
+	for i := 0; i < poolSize; i++ {
+		client, err := m.createClient(serviceName)
+		if err != nil {
+			// 关闭已创建的连接
+			for _, c := range pool.clients {
+				c.Close()
+			}
+			return nil, fmt.Errorf("failed to create client %d: %w", i, err)
+		}
+
+		if err := client.Connect(ctx); err != nil {
+			// 关闭已创建的连接
+			for _, c := range pool.clients {
+				c.Close()
+			}
+			return nil, fmt.Errorf("failed to connect client %d: %w", i, err)
+		}
+
+		pool.clients = append(pool.clients, client)
+	}
+
+	return pool, nil
+}
+
+// getClient 从连接池中获取客户端（轮询方式）
+func (p *clientPool) getClient() *grpc.Client {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.clients) == 0 {
+		return nil
+	}
+
+	// 使用原子操作实现轮询
+	idx := atomic.AddUint64(&p.index, 1) - 1
+	return p.clients[idx%uint64(len(p.clients))]
+}
+
+// close 关闭连接池中的所有连接
+func (p *clientPool) close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var errs []error
+	for _, client := range p.clients {
+		if err := client.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	p.clients = nil
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to close some clients: %v", errs)
+	}
+	return nil
+}
+
 // ConnectAll 连接所有已注册的客户端
 func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 	m.mu.Lock()
@@ -230,23 +314,18 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 
 	var errors []error
 	for serviceName := range m.services {
-		if _, exists := m.clients[serviceName]; exists {
+		if _, exists := m.clientPools[serviceName]; exists {
 			continue // 已经连接
 		}
 
-		client, err := m.createClient(serviceName)
+		pool, err := m.createClientPool(ctx, serviceName)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("service %s: %w", serviceName, err))
 			continue
 		}
 
-		if err := client.Connect(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("service %s: %w", serviceName, err))
-			continue
-		}
-
-		m.clients[serviceName] = client
-		logger.Info(ctx, "Connected gRPC client: service=%s", serviceName)
+		m.clientPools[serviceName] = pool
+		logger.Info(ctx, "Connected gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
 	}
 
 	if len(errors) > 0 {
@@ -261,18 +340,18 @@ func (m *GrpcClientManager) CloseClient(serviceName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	client, exists := m.clients[serviceName]
+	pool, exists := m.clientPools[serviceName]
 	if !exists {
 		return nil // 不存在，无需关闭
 	}
 
-	if err := client.Close(); err != nil {
-		logger.Error(context.Background(), "Failed to close client: service=%s, error=%v", serviceName, err)
+	if err := pool.close(); err != nil {
+		logger.Error(context.Background(), "Failed to close client pool: service=%s, error=%v", serviceName, err)
 		return err
 	}
 
-	delete(m.clients, serviceName)
-	logger.Info(context.Background(), "Closed gRPC client: service=%s", serviceName)
+	delete(m.clientPools, serviceName)
+	logger.Info(context.Background(), "Closed gRPC client pool: service=%s", serviceName)
 	return nil
 }
 
@@ -282,16 +361,16 @@ func (m *GrpcClientManager) CloseAll() error {
 	defer m.mu.Unlock()
 
 	var errors []error
-	for serviceName, client := range m.clients {
-		if err := client.Close(); err != nil {
+	for serviceName, pool := range m.clientPools {
+		if err := pool.close(); err != nil {
 			errors = append(errors, fmt.Errorf("service %s: %w", serviceName, err))
 		} else {
-			logger.Info(context.Background(), "Closed gRPC client: service=%s", serviceName)
+			logger.Info(context.Background(), "Closed gRPC client pool: service=%s", serviceName)
 		}
 	}
 
 	// 清空
-	m.clients = make(map[string]*grpc.Client)
+	m.clientPools = make(map[string]*clientPool)
 
 	// 关闭共享的 etcd resolver
 	if m.etcdResolver != nil {
@@ -335,8 +414,18 @@ func (m *GrpcClientManager) IsConnected(serviceName string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	client, exists := m.clients[serviceName]
-	return exists && client != nil && client.IsConnected()
+	pool, exists := m.clientPools[serviceName]
+	if !exists || pool == nil || len(pool.clients) == 0 {
+		return false
+	}
+
+	// 检查连接池中是否有可用连接
+	for _, client := range pool.clients {
+		if client != nil && client.IsConnected() {
+			return true
+		}
+	}
+	return false
 }
 
 // ==================== 单客户端封装（向后兼容） ====================

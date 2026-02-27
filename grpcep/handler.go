@@ -1,9 +1,14 @@
 package grpcep
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
+	"strings"
+	"time"
 
 	"github.com/team-dandelion/quickgo/gerr"
 	"github.com/team-dandelion/quickgo/http"
@@ -61,6 +66,112 @@ func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interf
 	ctx.Response().Header.Add("Content-Type", fiber.MIMEApplicationJSON)
 	_, err := ctx.WriteString(resp)
 	return err
+}
+
+func (b *BaseHandler) RPCStream(ctx *fiber.Ctx, param interface{}, streamFunc func(context.Context, interface{}) (interface{}, error)) error {
+	// 设置 SSE 相关的响应头
+	b.SetSSEStream(ctx)
+	// 请求 gRPC 流
+	rpcCtx := b.RPCCtx(ctx)
+	stream, err := streamFunc(rpcCtx, param)
+	if err != nil {
+		logger.Error(ctx.Context(), "rpc_stream error: %v", err)
+		return err
+	}
+	// 获取 stream 的 Recv 和 CloseSend 方法
+	streamValue := reflect.ValueOf(stream)
+	recvMethod := streamValue.MethodByName("Recv")
+	closeSendMethod := streamValue.MethodByName("CloseSend")
+
+	// 确保流在不再需要时关闭
+	if closeSendMethod.IsValid() {
+		defer closeSendMethod.Call(nil)
+	}
+
+	ctx.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		// 监听 stream 流数据
+		eventId := 0
+		for {
+			if !recvMethod.IsValid() {
+				logger.Error(context.Background(), "rpc_stream receive method is invalid")
+				break
+			}
+
+			// 调用 Recv 方法获取流数据
+			results := recvMethod.Call(nil)
+			if len(results) != 2 {
+				logger.Error(context.Background(), "rpc_stream receive method return length error")
+				break
+			}
+
+			// 检查错误
+			if !results[1].IsNil() {
+				err = results[1].Interface().(error)
+				if err == io.EOF {
+					break
+				}
+				logger.Error(context.Background(), "rpc_stream receive method return io.EOF")
+				break
+			}
+
+			// 获取内容并发送到客户端
+			var content string
+			// 尝试不同的方法获取内容
+			res := results[0].Interface()
+			contentValue := reflect.ValueOf(res).MethodByName("GetContent")
+			if contentValue.IsValid() {
+				content = contentValue.Call(nil)[0].String()
+			} else {
+				// 尝试直接将结果转换为JSON
+				jsonData, jsonErr := jsoniter.Marshal(res)
+				if jsonErr == nil {
+					content = string(jsonData)
+				} else {
+					content = fmt.Sprintf("%v", res)
+				}
+			}
+			// 格式化为标准EventStream格式
+			eventId++
+			sseMessage := fmt.Sprintf("id: %d\ndata: %s\n\n", eventId, content)
+			_, err = fmt.Fprint(w, sseMessage)
+			if err != nil {
+				logger.Error(context.Background(), "rpc_stream write error: %v", err)
+				break
+			}
+			err = w.Flush()
+			if err != nil {
+				// 检查连接是否已关闭
+				if errors.Is(err, io.ErrClosedPipe) || strings.Contains(err.Error(), "broken pipe") ||
+					strings.Contains(err.Error(), "connection reset by peer") ||
+					strings.Contains(err.Error(), "write: connection closed") {
+					logger.Error(context.Background(), "rpc_stream write error: %v", err)
+					break
+				}
+				logger.Error(context.Background(), "rpc_stream write error: %v", err)
+				break
+			}
+		}
+
+		// 发送结束事件
+		_, writeErr := fmt.Fprint(w, "event: close\ndata: {\"close\":true}\n\n")
+		if writeErr != nil {
+			// 连接可能已关闭，无需继续尝试写入
+			logger.Info(context.Background(), "rpc_stream write error: %v", writeErr)
+			return
+		}
+		err = w.Flush()
+		if err != nil {
+			// 检查连接是否已关闭
+			if errors.Is(err, io.ErrClosedPipe) || strings.Contains(err.Error(), "broken pipe") ||
+				strings.Contains(err.Error(), "connection reset by peer") ||
+				strings.Contains(err.Error(), "write: connection closed") {
+				logger.Info(context.Background(), "rpc_stream write error: %v", err)
+				return
+			}
+			logger.Error(context.Background(), "rpc_stream write error: %v", err)
+		}
+	})
+	return nil
 }
 
 func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string {
@@ -261,4 +372,16 @@ func (h *BaseHandler) msgAndCodeParser(code int32, msg string, err error) (int32
 	}
 
 	return code, msg
+}
+
+func (b *BaseHandler) SetSSEStream(ctx *fiber.Ctx) {
+	ctx.Set("Content-Type", "text/event-stream")
+	ctx.Set("Cache-Control", "no-cache")
+	ctx.Set("Connection", "keep-alive")
+	ctx.Set("Access-Control-Allow-Origin", "*")
+	ctx.Set("Transfer-Encoding", "chunked")
+	ctx.Set("X-Accel-Buffering", "no")
+	ctx.App().Server().WriteTimeout = 3600 * time.Second
+	ctx.App().Server().ReadTimeout = 3600 * time.Second
+	ctx.App().Server().MaxKeepaliveDuration = 3600 * time.Second
 }
