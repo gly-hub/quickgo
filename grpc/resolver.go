@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc/resolver"
@@ -116,12 +117,38 @@ func (b *resolverBuilder) Scheme() string {
 
 // serviceResolver gRPC resolver 实现
 type serviceResolver struct {
-	target resolver.Target
-	cc     resolver.ClientConn
-	sd     ServiceDiscovery
-	ctx    context.Context
-	cancel context.CancelFunc
-	mu     sync.Mutex
+	target      resolver.Target
+	cc          resolver.ClientConn
+	sd          ServiceDiscovery
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	serviceName string // 缓存解析后的服务名
+}
+
+// getServiceName 从 target 中解析服务名（兼容新旧版本 gRPC）
+func (r *serviceResolver) getServiceName() string {
+	if r.serviceName != "" {
+		return r.serviceName
+	}
+
+	// 尝试从 Endpoint() 获取（旧版本 gRPC）
+	serviceName := r.target.Endpoint()
+	if serviceName == "" {
+		// 新版本 gRPC 中 Endpoint() 可能返回空，需要从 URL 中获取
+		// 格式: etcd://service-name 或 etcd:///service-name
+		if r.target.URL.Host != "" {
+			serviceName = r.target.URL.Host
+		} else if r.target.URL.Opaque != "" {
+			serviceName = r.target.URL.Opaque
+		} else {
+			// 移除开头的 /
+			serviceName = strings.TrimPrefix(r.target.URL.Path, "/")
+		}
+	}
+
+	r.serviceName = serviceName
+	return serviceName
 }
 
 // start 开始解析
@@ -130,12 +157,18 @@ func (r *serviceResolver) start() {
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	r.mu.Unlock()
 
-	serviceName := r.target.Endpoint()
+	serviceName := r.getServiceName()
+	if serviceName == "" {
+		logger.Error(r.ctx, "Failed to parse service name from target: %v", r.target)
+		return
+	}
+
+	logger.Info(r.ctx, "Resolver starting for service: %s", serviceName)
 
 	// 首次解析
 	addresses, err := r.sd.Resolve(r.ctx, serviceName)
 	if err != nil {
-		logger.Error(r.ctx, "Failed to resolve service: service=%s", serviceName, err)
+		logger.Error(r.ctx, "Failed to resolve service: service=%s, error=%v", serviceName, err)
 		return
 	}
 
@@ -147,15 +180,16 @@ func (r *serviceResolver) start() {
 			r.updateState(addrs)
 		})
 		if err != nil {
-			logger.Error(r.ctx, "Service discovery watch failed: service=%s", serviceName, err)
+			logger.Error(r.ctx, "Service discovery watch failed: service=%s, error=%v", serviceName, err)
 		}
 	}()
 }
 
 // updateState 更新连接状态
 func (r *serviceResolver) updateState(addresses []string) {
+	serviceName := r.getServiceName()
 	if len(addresses) == 0 {
-		logger.Warn(r.ctx, "No addresses available for service: service=%s", r.target.Endpoint())
+		logger.Warn(r.ctx, "No addresses available for service: service=%s", serviceName)
 		return
 	}
 
@@ -171,19 +205,22 @@ func (r *serviceResolver) updateState(addresses []string) {
 	}
 
 	if err := r.cc.UpdateState(state); err != nil {
-		logger.Error(r.ctx, "Failed to update resolver state: service=%s", r.target.Endpoint(), err)
+		logger.Error(r.ctx, "Failed to update resolver state: service=%s, error=%v", serviceName, err)
 		return
 	}
 
-	logger.Info(r.ctx, "Resolver state updated: service=%s, addresses=%v", r.target.Endpoint(), addresses)
+	logger.Info(r.ctx, "Resolver state updated: service=%s, addresses=%v", serviceName, addresses)
 }
 
 // ResolveNow 立即重新解析
 func (r *serviceResolver) ResolveNow(resolver.ResolveNowOptions) {
-	serviceName := r.target.Endpoint()
+	serviceName := r.getServiceName()
+	if serviceName == "" {
+		return
+	}
 	addresses, err := r.sd.Resolve(r.ctx, serviceName)
 	if err != nil {
-		logger.Error(r.ctx, "Failed to resolve service: service=%s", serviceName, err)
+		logger.Error(r.ctx, "Failed to resolve service: service=%s, error=%v", serviceName, err)
 		return
 	}
 	r.updateState(addresses)
@@ -198,10 +235,24 @@ func (r *serviceResolver) Close() {
 	}
 }
 
-// RegisterResolver 注册 resolver
+// registeredSchemes 记录已注册的 scheme，避免重复注册
+var registeredSchemes = make(map[string]bool)
+var registeredSchemesMu sync.Mutex
+
+// RegisterResolver 注册 resolver（幂等，同一 scheme 只注册一次）
 func RegisterResolver(scheme string, sd ServiceDiscovery) {
+	registeredSchemesMu.Lock()
+	defer registeredSchemesMu.Unlock()
+
+	// 检查是否已经注册过
+	if registeredSchemes[scheme] {
+		logger.Debug(context.Background(), "Resolver already registered, skipping: scheme=%s", scheme)
+		return
+	}
+
 	builder := newResolverBuilder(scheme, sd)
 	resolver.Register(builder)
+	registeredSchemes[scheme] = true
 	logger.Info(context.Background(), "Resolver registered: scheme=%s", scheme)
 }
 
