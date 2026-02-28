@@ -100,7 +100,7 @@ func ExampleErrorHandling() {
 
 	// 记录错误
 	err := errors.New("数据库连接失败")
-	logger.Error(ctx, "无法连接到数据库: host=%s, port=%d, database=%s, retries=%d", "localhost", 5432, "mydb", 3, err)
+	logger.Error(ctx, "无法连接到数据库: host=%s, port=%d, database=%s, retries=%d, error=%v", "localhost", 5432, "mydb", 3, err)
 }
 
 // ExampleContextPropagation Context 传播示例
