@@ -177,7 +177,7 @@ func (sr *ServiceRegistrar) StartKeepAlive(interval time.Duration) {
 				return
 			case <-sr.keepAliveTicker.C:
 				if err := sr.registry.KeepAlive(sr.ctx, sr.serviceName, sr.address); err != nil {
-					logger.Error(sr.ctx, "KeepAlive failed: service=%s, address=%s", sr.serviceName, sr.address, err)
+					logger.Error(sr.ctx, "KeepAlive failed: service=%s, address=%s, error=%v", sr.serviceName, sr.address, err)
 				}
 			}
 		}

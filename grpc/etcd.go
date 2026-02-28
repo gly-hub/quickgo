@@ -279,7 +279,7 @@ func (r *EtcdRegistry) Deregister(ctx context.Context, serviceName, address stri
 	if r.leaseID != 0 {
 		_, err := r.client.Revoke(ctx, r.leaseID)
 		if err != nil {
-			logger.Error(ctx, "Failed to revoke lease: leaseID=%d", r.leaseID, err)
+			logger.Error(ctx, "Failed to revoke lease: leaseID=%d, error=%v", r.leaseID, err)
 		}
 		r.leaseID = 0
 		r.leaseKeep = nil

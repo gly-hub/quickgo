@@ -277,41 +277,42 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 	return string(result)
 }
 
-func (h *BaseHandler) RPCCtx(c *fiber.Ctx) (ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			ctx = c.Context()
-			return
-		}
-	}()
+func (h *BaseHandler) RPCCtx(c *fiber.Ctx) context.Context {
+	// 1. 获取基础 context（优先级：trace_ctx > UserContext > Context）
+	var ctx context.Context
 
-	// 1. 优先从 Locals 中获取 trace context（由 tracing middleware 设置）
+	// 优先从 Locals 中获取 trace context（由 tracing middleware 设置）
 	if traceCtx, ok := c.Locals("trace_ctx").(context.Context); ok && traceCtx != nil {
 		ctx = traceCtx
 	} else {
-		// 2. 如果没有，从 UserContext 获取（Fiber 的标准方式）
+		// 从 UserContext 获取（Fiber 的标准方式）
 		ctx = c.UserContext()
 		if ctx == nil {
+			// 最后使用 fasthttp context
 			ctx = c.Context()
 		}
 	}
 
-	// 3. 收集 UserValues 到 metadata（保留原有逻辑）
-	param := map[string]string{}
-	c.Context().VisitUserValues(func(bytes []byte, i interface{}) {
-		k := string(bytes)
-		v := cast.ToString(i)
-		param[k] = v
-	})
+	// 确保 context 不为 nil
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	// 4. 创建 gRPC metadata，包含 UserValues
-	userValuesMD := metadata.New(param)
+	// 2. 收集 UserValues 并创建 gRPC metadata
+	userValues := make(map[string]string)
+	if fctx := c.Context(); fctx != nil {
+		fctx.VisitUserValues(func(key []byte, value interface{}) {
+			userValues[string(key)] = cast.ToString(value)
+		})
+	}
 
-	// 5. 将 UserValues 的 metadata 设置到 context 中
-	ctx = metadata.NewOutgoingContext(ctx, userValuesMD)
+	// 3. 将 UserValues 添加到 outgoing metadata
+	if len(userValues) > 0 {
+		md := metadata.New(userValues)
+		ctx = metadata.NewOutgoingContext(ctx, md)
+	}
 
-	// 6. 将 trace context 注入到 gRPC metadata 中（用于 OpenTelemetry 链路追踪）
-	// InjectTraceContext 会将 trace context 添加到已有的 metadata 中
+	// 4. 注入 OpenTelemetry trace context 到 gRPC metadata
 	if tracing.IsEnabled() {
 		ctx = tracing.InjectTraceContext(ctx)
 	}

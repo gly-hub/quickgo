@@ -192,7 +192,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 连接服务器
 	conn, err := grpc.DialContext(connectCtx, c.address, c.options...)
 	if err != nil {
-		logger.Error(ctx, "Failed to connect to gRPC server: address=%s", c.address, err)
+		logger.Error(ctx, "Failed to connect to gRPC server: address=%s, error=%v", c.address, err)
 		return fmt.Errorf("failed to connect to %s: %w", c.address, err)
 	}
 
@@ -230,7 +230,7 @@ func (c *Client) Close() error {
 	ctx := context.Background()
 	err := c.conn.Close()
 	if err != nil {
-		logger.Error(ctx, "Failed to close gRPC client connection: address=%s", c.address, err)
+		logger.Error(ctx, "Failed to close gRPC client connection: address=%s, error=%v", c.address, err)
 		return err
 	}
 
@@ -258,7 +258,7 @@ func (c *Client) HealthCheck(ctx context.Context, service string) (*grpc_health_
 
 	resp, err := healthClient.Check(ctx, req)
 	if err != nil {
-		logger.Error(ctx, "Health check failed: service=%s, address=%s", service, c.address, err)
+		logger.Error(ctx, "Health check failed: service=%s, address=%s, error=%v", service, c.address, err)
 		return nil, fmt.Errorf("health check failed: %w", err)
 	}
 

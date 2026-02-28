@@ -29,6 +29,10 @@ type GrpcClientConfig struct {
 	LoadBalancing string `json:"loadBalancing" yaml:"loadBalancing" toml:"loadBalancing"`
 	// 连接池大小（每个服务的连接数，默认为 1，建议设置为 2-4 以避免 HTTP/2 HPACK 并发问题）
 	PoolSize int `json:"poolSize" yaml:"poolSize" toml:"poolSize"`
+	// 健康检查间隔 示例：30s（默认 30s，设置为空或 0 则禁用）
+	HealthCheckInterval string `json:"healthCheckInterval" yaml:"healthCheckInterval" toml:"healthCheckInterval"`
+	// 连接失败后重试间隔 示例：5s（默认 5s）
+	ReconnectInterval string `json:"reconnectInterval" yaml:"reconnectInterval" toml:"reconnectInterval"`
 	// Etcd 配置（使用 etcd 服务发现时必需，全局共享）
 	Etcd *EtcdConfig `json:"etcd" yaml:"etcd" toml:"etcd"`
 }
@@ -36,18 +40,25 @@ type GrpcClientConfig struct {
 // GrpcClientManager gRPC 客户端管理器
 // 用于管理多个 gRPC 服务客户端，适合网关场景
 type GrpcClientManager struct {
-	clientPools  map[string]*clientPool   // 服务名称 -> 连接池
-	services     map[string]string        // 服务名称 -> 服务名称（用于记录已注册的服务）
-	globalConfig *GrpcClientConfig        // 全局配置（所有服务共享）
-	etcdResolver *grpc.EtcdResolver       // 共享的 etcd resolver
-	mu           sync.RWMutex
+	clientPools         map[string]*clientPool // 服务名称 -> 连接池
+	services            map[string]string      // 服务名称 -> 服务名称（用于记录已注册的服务）
+	globalConfig        *GrpcClientConfig      // 全局配置（所有服务共享）
+	etcdResolver        *grpc.EtcdResolver     // 共享的 etcd resolver
+	mu                  sync.RWMutex
+	healthCheckInterval time.Duration // 健康检查间隔
+	reconnectInterval   time.Duration // 重连间隔
+	healthCheckCtx      context.Context
+	healthCheckCancel   context.CancelFunc
+	healthCheckRunning  bool
 }
 
 // clientPool 连接池
 type clientPool struct {
-	clients []*grpc.Client // 连接池中的客户端
-	index   uint64         // 轮询索引（使用原子操作）
-	mu      sync.RWMutex
+	serviceName string         // 服务名称
+	clients     []*grpc.Client // 连接池中的客户端
+	index       uint64         // 轮询索引（使用原子操作）
+	mu          sync.RWMutex
+	unhealthy   []int // 不健康的连接索引
 }
 
 // NewGrpcClientManager 创建 gRPC 客户端管理器
@@ -62,10 +73,40 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 		config.PoolSize = 1
 	}
 
+	// 解析健康检查间隔（默认 30s）
+	var healthCheckInterval time.Duration
+	if config.HealthCheckInterval != "" {
+		var err error
+		healthCheckInterval, err = time.ParseDuration(config.HealthCheckInterval)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse health check interval: %w", err)
+		}
+	} else {
+		healthCheckInterval = 30 * time.Second // 默认 30 秒
+	}
+
+	// 解析重连间隔（默认 5s）
+	var reconnectInterval time.Duration
+	if config.ReconnectInterval != "" {
+		var err error
+		reconnectInterval, err = time.ParseDuration(config.ReconnectInterval)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse reconnect interval: %w", err)
+		}
+	} else {
+		reconnectInterval = 5 * time.Second // 默认 5 秒
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	manager := &GrpcClientManager{
-		clientPools:  make(map[string]*clientPool),
-		services:     make(map[string]string),
-		globalConfig: config,
+		clientPools:         make(map[string]*clientPool),
+		services:            make(map[string]string),
+		globalConfig:        config,
+		healthCheckInterval: healthCheckInterval,
+		reconnectInterval:   reconnectInterval,
+		healthCheckCtx:      ctx,
+		healthCheckCancel:   cancel,
 	}
 
 	// 如果配置了 etcd，创建共享的 resolver
@@ -247,7 +288,9 @@ func (m *GrpcClientManager) createClientPool(ctx context.Context, serviceName st
 	}
 
 	pool := &clientPool{
-		clients: make([]*grpc.Client, 0, poolSize),
+		serviceName: serviceName,
+		clients:     make([]*grpc.Client, 0, poolSize),
+		unhealthy:   make([]int, 0),
 	}
 
 	for i := 0; i < poolSize; i++ {
@@ -357,6 +400,9 @@ func (m *GrpcClientManager) CloseClient(serviceName string) error {
 
 // CloseAll 关闭所有客户端
 func (m *GrpcClientManager) CloseAll() error {
+	// 先停止健康检查
+	m.StopHealthCheck()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -426,6 +472,198 @@ func (m *GrpcClientManager) IsConnected(serviceName string) bool {
 		}
 	}
 	return false
+}
+
+// StartHealthCheck 启动后台健康检查
+// 定期检查所有连接池中的连接状态，自动重连不健康的连接
+func (m *GrpcClientManager) StartHealthCheck() {
+	m.mu.Lock()
+	if m.healthCheckRunning {
+		m.mu.Unlock()
+		return
+	}
+	m.healthCheckRunning = true
+	m.mu.Unlock()
+
+	if m.healthCheckInterval <= 0 {
+		logger.Info(context.Background(), "Health check disabled (interval <= 0)")
+		return
+	}
+
+	logger.Info(context.Background(), "Starting gRPC client health check: interval=%v", m.healthCheckInterval)
+
+	go m.healthCheckLoop()
+}
+
+// StopHealthCheck 停止后台健康检查
+func (m *GrpcClientManager) StopHealthCheck() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.healthCheckRunning {
+		return
+	}
+
+	if m.healthCheckCancel != nil {
+		m.healthCheckCancel()
+	}
+	m.healthCheckRunning = false
+	logger.Info(context.Background(), "Stopped gRPC client health check")
+}
+
+// healthCheckLoop 健康检查循环
+func (m *GrpcClientManager) healthCheckLoop() {
+	ticker := time.NewTicker(m.healthCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.healthCheckCtx.Done():
+			return
+		case <-ticker.C:
+			m.performHealthCheck()
+		}
+	}
+}
+
+// performHealthCheck 执行一次健康检查
+func (m *GrpcClientManager) performHealthCheck() {
+	m.mu.RLock()
+	pools := make(map[string]*clientPool, len(m.clientPools))
+	for name, pool := range m.clientPools {
+		pools[name] = pool
+	}
+	m.mu.RUnlock()
+
+	for serviceName, pool := range pools {
+		m.checkPoolHealth(serviceName, pool)
+	}
+}
+
+// checkPoolHealth 检查单个连接池的健康状态
+func (m *GrpcClientManager) checkPoolHealth(serviceName string, pool *clientPool) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	unhealthyIndices := make([]int, 0)
+
+	for i, client := range pool.clients {
+		if client == nil {
+			unhealthyIndices = append(unhealthyIndices, i)
+			continue
+		}
+
+		// 检查连接状态
+		if !client.IsConnected() {
+			logger.Warn(context.Background(), "Unhealthy connection detected: service=%s, index=%d", serviceName, i)
+			unhealthyIndices = append(unhealthyIndices, i)
+		}
+	}
+
+	pool.unhealthy = unhealthyIndices
+
+	// 如果有不健康的连接，尝试重连
+	if len(unhealthyIndices) > 0 {
+		go m.reconnectUnhealthyClients(serviceName, pool, unhealthyIndices)
+	}
+}
+
+// reconnectUnhealthyClients 重连不健康的客户端
+func (m *GrpcClientManager) reconnectUnhealthyClients(serviceName string, pool *clientPool, indices []int) {
+	for _, idx := range indices {
+		select {
+		case <-m.healthCheckCtx.Done():
+			return
+		default:
+		}
+
+		pool.mu.Lock()
+		if idx >= len(pool.clients) {
+			pool.mu.Unlock()
+			continue
+		}
+
+		oldClient := pool.clients[idx]
+		pool.mu.Unlock()
+
+		// 关闭旧连接
+		if oldClient != nil {
+			oldClient.Close()
+		}
+
+		// 创建新客户端
+		newClient, err := m.createClient(serviceName)
+		if err != nil {
+			logger.Error(context.Background(), "Failed to create new client for reconnection: service=%s, index=%d, error=%v", serviceName, idx, err)
+			time.Sleep(m.reconnectInterval)
+			continue
+		}
+
+		// 连接
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := newClient.Connect(ctx); err != nil {
+			cancel()
+			logger.Error(context.Background(), "Failed to reconnect client: service=%s, index=%d, error=%v", serviceName, idx, err)
+			newClient.Close()
+			time.Sleep(m.reconnectInterval)
+			continue
+		}
+		cancel()
+
+		// 替换客户端
+		pool.mu.Lock()
+		if idx < len(pool.clients) {
+			pool.clients[idx] = newClient
+			// 从不健康列表中移除
+			for i, unhealthyIdx := range pool.unhealthy {
+				if unhealthyIdx == idx {
+					pool.unhealthy = append(pool.unhealthy[:i], pool.unhealthy[i+1:]...)
+					break
+				}
+			}
+		} else {
+			newClient.Close()
+		}
+		pool.mu.Unlock()
+
+		logger.Info(context.Background(), "Reconnected client successfully: service=%s, index=%d", serviceName, idx)
+	}
+}
+
+// GetPoolStatus 获取连接池状态信息
+func (m *GrpcClientManager) GetPoolStatus() map[string]PoolStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	status := make(map[string]PoolStatus)
+	for name, pool := range m.clientPools {
+		pool.mu.RLock()
+		healthy := 0
+		unhealthy := 0
+		for _, client := range pool.clients {
+			if client != nil && client.IsConnected() {
+				healthy++
+			} else {
+				unhealthy++
+			}
+		}
+		status[name] = PoolStatus{
+			ServiceName: name,
+			Total:       len(pool.clients),
+			Healthy:     healthy,
+			Unhealthy:   unhealthy,
+		}
+		pool.mu.RUnlock()
+	}
+	return status
+}
+
+// PoolStatus 连接池状态
+type PoolStatus struct {
+	ServiceName string `json:"serviceName"`
+	Total       int    `json:"total"`
+	Healthy     int    `json:"healthy"`
+	Unhealthy   int    `json:"unhealthy"`
 }
 
 // ==================== 单客户端封装（向后兼容） ====================

@@ -56,7 +56,7 @@ func LoggingInterceptor() grpc.UnaryServerInterceptor {
 		// 记录响应信息
 		duration := time.Since(start)
 		if err != nil {
-			logger.Error(ctx, "gRPC call failed: method=%s, duration=%v", info.FullMethod, duration, err)
+			logger.Error(ctx, "gRPC call failed: method=%s, duration=%v, error=%v", info.FullMethod, duration, err)
 		} else {
 			logger.Info(ctx, "gRPC call success: method=%s, duration=%v", info.FullMethod, duration)
 		}
@@ -180,7 +180,7 @@ func StreamLoggingInterceptor() grpc.StreamServerInterceptor {
 		// 记录响应信息
 		duration := time.Since(start)
 		if err != nil {
-			logger.Error(ctx, "gRPC stream call failed: method=%s, duration=%v", info.FullMethod, duration, err)
+			logger.Error(ctx, "gRPC stream call failed: method=%s, duration=%v, error=%v", info.FullMethod, duration, err)
 		} else {
 			logger.Info(ctx, "gRPC stream call success: method=%s, duration=%v", info.FullMethod, duration)
 		}
@@ -222,7 +222,7 @@ func ClientStreamLoggingInterceptor() grpc.StreamClientInterceptor {
 		stream, err := streamer(ctx, desc, cc, method, opts...)
 		if err != nil {
 			duration := time.Since(start)
-			logger.Error(ctx, "gRPC client stream call failed: method=%s, duration=%v", method, duration, err)
+			logger.Error(ctx, "gRPC client stream call failed: method=%s, duration=%v, error=%v", method, duration, err)
 			return nil, err
 		}
 
@@ -276,7 +276,7 @@ func ClientLoggingInterceptor() grpc.UnaryClientInterceptor {
 		// 记录响应信息
 		duration := time.Since(start)
 		if err != nil {
-			logger.Error(ctx, "gRPC client call failed: method=%s, duration=%v", method, duration, err)
+			logger.Error(ctx, "gRPC client call failed: method=%s, duration=%v, error=%v", method, duration, err)
 		} else {
 			logger.Info(ctx, "gRPC client call success: method=%s, duration=%v", method, duration)
 		}
