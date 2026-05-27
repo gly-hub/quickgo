@@ -25,6 +25,22 @@ import (
 type BaseHandler struct {
 }
 
+// isConnectionClosed 检查错误是否表示连接已关闭
+// 用于 SSE 流式响应中检测客户端断开连接
+func isConnectionClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "broken pipe") ||
+		strings.Contains(errMsg, "connection reset by peer") ||
+		strings.Contains(errMsg, "write: connection closed") ||
+		strings.Contains(errMsg, "client disconnected")
+}
+
 func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interface{}) error {
 	c := ctx.Context()
 
@@ -141,13 +157,11 @@ func (b *BaseHandler) RPCStream(ctx *fiber.Ctx, param interface{}, streamFunc fu
 			err = w.Flush()
 			if err != nil {
 				// 检查连接是否已关闭
-				if errors.Is(err, io.ErrClosedPipe) || strings.Contains(err.Error(), "broken pipe") ||
-					strings.Contains(err.Error(), "connection reset by peer") ||
-					strings.Contains(err.Error(), "write: connection closed") {
-					logger.Error(context.Background(), "rpc_stream write error: %v", err)
-					break
+				if isConnectionClosed(err) {
+					logger.Info(context.Background(), "rpc_stream client disconnected: %v", err)
+				} else {
+					logger.Error(context.Background(), "rpc_stream flush error: %v", err)
 				}
-				logger.Error(context.Background(), "rpc_stream write error: %v", err)
 				break
 			}
 		}
@@ -156,19 +170,21 @@ func (b *BaseHandler) RPCStream(ctx *fiber.Ctx, param interface{}, streamFunc fu
 		_, writeErr := fmt.Fprint(w, "event: close\ndata: {\"close\":true}\n\n")
 		if writeErr != nil {
 			// 连接可能已关闭，无需继续尝试写入
-			logger.Info(context.Background(), "rpc_stream write error: %v", writeErr)
+			if isConnectionClosed(writeErr) {
+				logger.Info(context.Background(), "rpc_stream client disconnected before close event: %v", writeErr)
+			} else {
+				logger.Error(context.Background(), "rpc_stream close event write error: %v", writeErr)
+			}
 			return
 		}
 		err = w.Flush()
 		if err != nil {
 			// 检查连接是否已关闭
-			if errors.Is(err, io.ErrClosedPipe) || strings.Contains(err.Error(), "broken pipe") ||
-				strings.Contains(err.Error(), "connection reset by peer") ||
-				strings.Contains(err.Error(), "write: connection closed") {
-				logger.Info(context.Background(), "rpc_stream write error: %v", err)
-				return
+			if isConnectionClosed(err) {
+				logger.Info(context.Background(), "rpc_stream client disconnected on close: %v", err)
+			} else {
+				logger.Error(context.Background(), "rpc_stream final flush error: %v", err)
 			}
-			logger.Error(context.Background(), "rpc_stream write error: %v", err)
 		}
 	})
 	return nil

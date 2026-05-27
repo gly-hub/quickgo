@@ -15,6 +15,11 @@ import (
 
 // GrpcClientConfig gRPC 客户端配置（全局配置，所有服务共享）
 type GrpcClientConfig struct {
+	// 服务发现模式：static（静态地址），etcd（etcd 服务发现）
+	Discovery string `json:"discovery" yaml:"discovery" toml:"discovery"`
+	// 静态服务地址映射（discovery=static 时使用）
+	// 格式：服务名 -> 地址（如 "user-service": "127.0.0.1:9001"）
+	StaticAddresses map[string]string `json:"staticAddresses" yaml:"staticAddresses" toml:"staticAddresses"`
 	// 连接超时时间 示例：10s
 	Timeout string `json:"timeout" yaml:"timeout" toml:"timeout"`
 	// 是否使用非安全连接（不加密）
@@ -240,9 +245,19 @@ func (m *GrpcClientManager) createClient(serviceName string) (*grpc.Client, erro
 		}
 	}
 
+	// 确定连接地址
+	// 如果是静态模式，从 StaticAddresses 中获取地址
+	address := serviceName
+	if config.Discovery == "static" && config.StaticAddresses != nil {
+		if staticAddr, ok := config.StaticAddresses[serviceName]; ok {
+			address = staticAddr
+			logger.Info(context.Background(), "Using static address for service: service=%s, address=%s", serviceName, address)
+		}
+	}
+
 	// 构建客户端配置
 	clientConfig := grpc.ClientConfig{
-		Address:  serviceName, // 使用传入的服务名称
+		Address:  address, // 使用解析后的地址
 		Timeout:  timeout,
 		Insecure: config.Insecure,
 	}
@@ -477,18 +492,19 @@ func (m *GrpcClientManager) IsConnected(serviceName string) bool {
 // StartHealthCheck 启动后台健康检查
 // 定期检查所有连接池中的连接状态，自动重连不健康的连接
 func (m *GrpcClientManager) StartHealthCheck() {
+	if m.healthCheckInterval <= 0 {
+		logger.Info(context.Background(), "Health check disabled (interval <= 0)")
+		return
+	}
+
 	m.mu.Lock()
 	if m.healthCheckRunning {
 		m.mu.Unlock()
 		return
 	}
 	m.healthCheckRunning = true
+	m.healthCheckCtx, m.healthCheckCancel = context.WithCancel(context.Background())
 	m.mu.Unlock()
-
-	if m.healthCheckInterval <= 0 {
-		logger.Info(context.Background(), "Health check disabled (interval <= 0)")
-		return
-	}
 
 	logger.Info(context.Background(), "Starting gRPC client health check: interval=%v", m.healthCheckInterval)
 

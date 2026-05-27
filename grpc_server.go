@@ -58,38 +58,42 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	if config == nil {
 		return nil, errors.New("config is nil")
 	}
-	if config.Etcd == nil {
-		return nil, errors.New("etcd config is nil")
-	}
 
-	dialTimeout, err := time.ParseDuration(config.Etcd.DialTimeout)
-	if err != nil {
-		logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Etcd.DialTimeout: %v", err)
-		return nil, err
-	}
-	// 创建 etcd 注册中心配置
-	etcdConfig := grpc.EtcdConfig{
-		Endpoints:   config.Etcd.Endpoints,
-		DialTimeout: dialTimeout,
-		Prefix:      config.Etcd.Prefix,
-		TTL:         config.Etcd.TTL,
-		Username:    config.Etcd.Username,
-		Password:    config.Etcd.Password,
-	}
+	var registrar *grpc.ServiceRegistrar
 
-	// 创建 etcd registry
-	registry, err := grpc.NewEtcdRegistry(etcdConfig)
-	if err != nil {
-		logger.Fatal(context.Background(), "Failed to create etcd registry: %v", err)
+	// etcd 配置是可选的，如果配置了 etcd 则启用服务注册
+	if config.Etcd != nil {
+		dialTimeout, err := time.ParseDuration(config.Etcd.DialTimeout)
+		if err != nil {
+			logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Etcd.DialTimeout: %v", err)
+			return nil, err
+		}
+		// 创建 etcd 注册中心配置
+		etcdConfig := grpc.EtcdConfig{
+			Endpoints:   config.Etcd.Endpoints,
+			DialTimeout: dialTimeout,
+			Prefix:      config.Etcd.Prefix,
+			TTL:         config.Etcd.TTL,
+			Username:    config.Etcd.Username,
+			Password:    config.Etcd.Password,
+		}
+
+		// 创建 etcd registry
+		registry, err := grpc.NewEtcdRegistry(etcdConfig)
+		if err != nil {
+			logger.Fatal(context.Background(), "Failed to create etcd registry: %v", err)
+		}
+		// 创建服务注册器
+		metadata := map[string]string{
+			"version": "1.0.0",
+			"weight":  "10",
+			"region":  "default",
+		}
+		registrar = grpc.NewServiceRegistrar(registry, config.ServiceName,
+			config.Address, metadata)
+	} else {
+		logger.Info(context.Background(), "Etcd not configured, running in standalone mode (no service discovery)")
 	}
-	// 创建服务注册器
-	metadata := map[string]string{
-		"version": "1.0.0",
-		"weight":  "10",
-		"region":  "default",
-	}
-	registrar := grpc.NewServiceRegistrar(registry, config.ServiceName,
-		config.Address, metadata)
 
 	keepTime, err := time.ParseDuration(config.KeepAliveTime)
 	if err != nil {
@@ -172,6 +176,12 @@ func (s *GrpcServer) Start() error {
 	// 等待服务器启动
 	time.Sleep(500 * time.Millisecond)
 
+	// 如果没有配置 etcd，跳过服务注册
+	if s.config.Etcd == nil {
+		logger.Info(context.Background(), "Running in standalone mode, skipping service registration")
+		return nil
+	}
+
 	// 使用正确的地址注册服务（包含端口）
 	// 需要重新创建 registrar，因为创建时使用的是 config.Address（0.0.0.0），缺少端口
 	// 先关闭旧的 registrar（如果存在）
@@ -179,35 +189,33 @@ func (s *GrpcServer) Start() error {
 		s.registrar.Close()
 	}
 
-	if s.config.Etcd != nil {
-		dialTimeout, err := time.ParseDuration(s.config.Etcd.DialTimeout)
-		if err != nil {
-			return fmt.Errorf("failed to parse etcd dial timeout: %w", err)
-		}
-
-		etcdConfig := grpc.EtcdConfig{
-			Endpoints:   s.config.Etcd.Endpoints,
-			DialTimeout: dialTimeout,
-			Prefix:      s.config.Etcd.Prefix,
-			TTL:         s.config.Etcd.TTL,
-			Username:    s.config.Etcd.Username,
-			Password:    s.config.Etcd.Password,
-		}
-
-		registry, err := grpc.NewEtcdRegistry(etcdConfig)
-		if err != nil {
-			return fmt.Errorf("failed to create etcd registry: %w", err)
-		}
-
-		metadata := map[string]string{
-			"version": "1.0.0",
-			"weight":  "10",
-			"region":  "default",
-		}
-
-		// 使用包含端口的完整地址创建新的 registrar
-		s.registrar = grpc.NewServiceRegistrar(registry, s.config.ServiceName, serverAddress, metadata)
+	dialTimeout, err := time.ParseDuration(s.config.Etcd.DialTimeout)
+	if err != nil {
+		return fmt.Errorf("failed to parse etcd dial timeout: %w", err)
 	}
+
+	etcdConfig := grpc.EtcdConfig{
+		Endpoints:   s.config.Etcd.Endpoints,
+		DialTimeout: dialTimeout,
+		Prefix:      s.config.Etcd.Prefix,
+		TTL:         s.config.Etcd.TTL,
+		Username:    s.config.Etcd.Username,
+		Password:    s.config.Etcd.Password,
+	}
+
+	registry, err := grpc.NewEtcdRegistry(etcdConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create etcd registry: %w", err)
+	}
+
+	metadata := map[string]string{
+		"version": "1.0.0",
+		"weight":  "10",
+		"region":  "default",
+	}
+
+	// 使用包含端口的完整地址创建新的 registrar
+	s.registrar = grpc.NewServiceRegistrar(registry, s.config.ServiceName, serverAddress, metadata)
 
 	if err := s.registrar.Register(context.Background()); err != nil {
 		logger.Fatal(context.Background(), "Failed to register service to etcd: %v", err)
@@ -220,14 +228,17 @@ func (s *GrpcServer) Start() error {
 }
 
 func (s *GrpcServer) Stop() error {
-	if err := s.registrar.Deregister(context.Background()); err != nil {
-		logger.Error(context.Background(), "Failed to deregister service: %v", err)
-		return err
-	}
+	// 如果有 registrar（etcd 模式），需要注销服务
+	if s.registrar != nil {
+		if err := s.registrar.Deregister(context.Background()); err != nil {
+			logger.Error(context.Background(), "Failed to deregister service: %v", err)
+			return err
+		}
 
-	if err := s.registrar.Close(); err != nil {
-		logger.Error(context.Background(), "Failed to close registrar: %v", err)
-		return err
+		if err := s.registrar.Close(); err != nil {
+			logger.Error(context.Background(), "Failed to close registrar: %v", err)
+			return err
+		}
 	}
 
 	if err := s.server.Stop(); err != nil {

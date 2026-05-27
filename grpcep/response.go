@@ -2,53 +2,65 @@ package grpcep
 
 import (
 	"reflect"
-	"unsafe"
 
 	"github.com/team-dandelion/quickgo/gerr"
 )
 
-var statusCodeOffset = uintptr(0)
-var statusMsgOffset = unsafe.Sizeof(0)
-
 func InitResponse(in interface{}) {
-	rt := reflect.TypeOf(in)
-	rt = rt.Elem().Elem()
+	rv := reflect.ValueOf(in)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return
+	}
 
-	v := reflect.New(rt)
-	dataPointer := v.Pointer()
+	// 获取指针指向的元素（应该也是一个指针）
+	elem := rv.Elem()
+	if elem.Kind() != reflect.Ptr {
+		return
+	}
 
-	// 首先尝试查找 common_resp 字段
-	status, exists := rt.FieldByName("common_resp")
-	if !exists {
-		// 如果没有找到 common_resp，尝试查找 CommonResp 字段
-		status, exists = rt.FieldByName("CommonResp")
-		if !exists {
-			// 如果都没有找到，直接返回，不设置元数据字段
-			iPointer := *(*Iface)(unsafe.Pointer(&in))
-			*(*uintptr)(iPointer.Value) = dataPointer
-			return
+	// 获取实际类型并创建新实例
+	elemType := elem.Type().Elem()
+	newVal := reflect.New(elemType)
+
+	// 查找 CommonResp 字段（支持 proto 生成的 snake_case 和 CamelCase）
+	fieldName := ""
+	if _, exists := elemType.FieldByName("CommonResp"); exists {
+		fieldName = "CommonResp"
+	} else if _, exists := elemType.FieldByName("common_resp"); exists {
+		fieldName = "common_resp"
+	}
+
+	// 如果找到字段，设置默认值
+	if fieldName != "" {
+		field := newVal.Elem().FieldByName(fieldName)
+		if field.IsValid() && field.CanSet() && field.Kind() == reflect.Ptr {
+			// 获取字段的实际类型（例如 *gen.CommonResp）
+			fieldType := field.Type()
+			// 创建该类型的新实例
+			newFieldVal := reflect.New(fieldType.Elem())
+			// 设置 Code 和 Msg 字段
+			if codeField := newFieldVal.Elem().FieldByName("Code"); codeField.IsValid() && codeField.CanSet() {
+				codeField.SetInt(int64(SuccessCode))
+			}
+			if msgField := newFieldVal.Elem().FieldByName("Msg"); msgField.IsValid() && msgField.CanSet() {
+				msgField.SetString(SuccessDesc)
+			}
+			// 设置字段值
+			field.Set(newFieldVal)
 		}
 	}
 
-	*(**CommonResp)((unsafe.Pointer)(dataPointer + status.Offset)) = &CommonResp{
-		Code: SuccessCode,
-		Msg:  SuccessDesc,
-	}
-
-	iPointer := *(*Iface)(unsafe.Pointer(&in))
-	*(*uintptr)(iPointer.Value) = dataPointer
-
-	return
+	// 设置指针值
+	elem.Set(newVal)
 }
 
 func WithError(ret interface{}, err error) (ok bool) {
 	defer func() {
-		if err1 := recover(); err1 != nil {
+		if r := recover(); r != nil {
 			ok = false
-			return
 		}
 	}()
-	ok = true
+
 	if IsNilValue(ret) {
 		return false
 	}
@@ -58,10 +70,9 @@ func WithError(ret interface{}, err error) (ok bool) {
 	}
 
 	newErr := gerr.Parse(err)
-	var (
-		code = newErr.GetCode()
-		msg  = newErr.GetMsg()
-	)
+	code := newErr.GetCode()
+	msg := newErr.GetMsg()
+
 	if code == 0 {
 		code = InternalErrCode
 	}
@@ -69,37 +80,49 @@ func WithError(ret interface{}, err error) (ok bool) {
 		msg = InternalErrDesc
 	}
 
-	rt := reflect.TypeOf(ret)
-	if rt.Kind() == reflect.Ptr {
-		rt = rt.Elem()
-	}
-	if rt.Kind() == reflect.Ptr {
-		rt = rt.Elem()
-	}
-
-	statusField, exists := rt.FieldByName(CommonRespKey)
-	if !exists {
-		statusField, exists = rt.FieldByName(CommonRespKeyV2)
-	}
-	iVal := *(*Iface)(unsafe.Pointer(&ret))
-	valPos := uintptr(iVal.Value)
-	if exists {
-		// 替换赋值
-		status := *(*uintptr)(unsafe.Pointer(valPos + statusField.Offset))
-		if status == 0 {
+	rv := reflect.ValueOf(ret)
+	// 解引用指针
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
 			return false
 		}
-		*(*int32)(unsafe.Pointer(status + statusCodeOffset)) = code
-		*(*string)(unsafe.Pointer(status + statusMsgOffset)) = msg
-	} else {
-		// 类型推断
-		if _, ok = ret.(*CommonResp); ok {
-			*(*int32)(unsafe.Pointer(valPos + statusCodeOffset)) = code
-			*(*string)(unsafe.Pointer(valPos + statusMsgOffset)) = msg
-		} else {
-			return false
+		rv = rv.Elem()
+	}
+
+	// 查找 CommonResp 字段
+	var field reflect.Value
+	if f := rv.FieldByName(CommonRespKey); f.IsValid() {
+		field = f
+	} else if f := rv.FieldByName(CommonRespKeyV2); f.IsValid() {
+		field = f
+	}
+
+	if field.IsValid() {
+		// 字段存在，获取 CommonResp 指针
+		if field.Kind() == reflect.Ptr {
+			if field.IsNil() {
+				return false
+			}
+			commonResp := field.Elem()
+			setCommonRespFields(commonResp, code, msg)
+			return true
 		}
 	}
 
-	return ok
+	// 类型推断：直接是 CommonResp 类型
+	if rv.Type() == reflect.TypeOf(CommonResp{}) {
+		setCommonRespFields(rv, code, msg)
+		return true
+	}
+
+	return false
+}
+
+func setCommonRespFields(rv reflect.Value, code int32, msg string) {
+	if codeField := rv.FieldByName("Code"); codeField.IsValid() && codeField.CanSet() {
+		codeField.SetInt(int64(code))
+	}
+	if msgField := rv.FieldByName("Msg"); msgField.IsValid() && msgField.CanSet() {
+		msgField.SetString(msg)
+	}
 }
