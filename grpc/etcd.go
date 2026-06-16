@@ -34,11 +34,17 @@ type EtcdConfig struct {
 
 // EtcdResolver etcd 服务发现实现
 type EtcdResolver struct {
-	client   *clientv3.Client
-	prefix   string
-	key      string
-	watchers map[string]context.CancelFunc
-	mu       sync.RWMutex
+	client     *clientv3.Client
+	prefix     string
+	key        string
+	watchers   map[string]watcherEntry
+	watcherSeq uint64
+	mu         sync.RWMutex
+}
+
+type watcherEntry struct {
+	id     uint64
+	cancel context.CancelFunc
 }
 
 // NewEtcdResolver 创建 etcd 服务发现
@@ -74,7 +80,7 @@ func NewEtcdResolver(config EtcdConfig) (*EtcdResolver, error) {
 		client:   client,
 		prefix:   config.Prefix,
 		key:      etcdConfigKey(config),
-		watchers: make(map[string]context.CancelFunc),
+		watchers: make(map[string]watcherEntry),
 	}, nil
 }
 
@@ -121,12 +127,14 @@ func (r *EtcdResolver) Watch(ctx context.Context, serviceName string, callback f
 
 	r.mu.Lock()
 	// 如果已经有 watcher，先取消
-	if cancel, ok := r.watchers[serviceName]; ok {
-		cancel()
+	if watcher, ok := r.watchers[serviceName]; ok {
+		watcher.cancel()
 	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
-	r.watchers[serviceName] = cancel
+	r.watcherSeq++
+	watcherID := r.watcherSeq
+	r.watchers[serviceName] = watcherEntry{id: watcherID, cancel: cancel}
 	r.mu.Unlock()
 
 	// 首次获取
@@ -139,6 +147,13 @@ func (r *EtcdResolver) Watch(ctx context.Context, serviceName string, callback f
 	watchChan := r.client.Watch(watchCtx, key, clientv3.WithPrefix())
 
 	go func() {
+		defer func() {
+			r.mu.Lock()
+			if watcher, ok := r.watchers[serviceName]; ok && watcher.id == watcherID {
+				delete(r.watchers, serviceName)
+			}
+			r.mu.Unlock()
+		}()
 		for {
 			select {
 			case <-watchCtx.Done():
@@ -169,10 +184,10 @@ func (r *EtcdResolver) Close() error {
 	defer r.mu.Unlock()
 
 	// 取消所有 watcher
-	for _, cancel := range r.watchers {
-		cancel()
+	for _, watcher := range r.watchers {
+		watcher.cancel()
 	}
-	r.watchers = make(map[string]context.CancelFunc)
+	r.watchers = make(map[string]watcherEntry)
 
 	if r.client != nil {
 		return r.client.Close()
@@ -257,6 +272,8 @@ func (r *EtcdRegistry) Register(ctx context.Context, serviceName, address string
 	// 注册服务
 	_, err = r.client.Put(ctx, key, value, clientv3.WithLease(r.leaseID))
 	if err != nil {
+		_, _ = r.client.Revoke(ctx, r.leaseID)
+		r.leaseID = 0
 		return fmt.Errorf("failed to register service: %w", err)
 	}
 
@@ -264,6 +281,8 @@ func (r *EtcdRegistry) Register(ctx context.Context, serviceName, address string
 	keepAliveCtx := context.Background()
 	r.leaseKeep, err = r.client.KeepAlive(keepAliveCtx, r.leaseID)
 	if err != nil {
+		_, _ = r.client.Revoke(ctx, r.leaseID)
+		r.leaseID = 0
 		return fmt.Errorf("failed to start keepalive: %w", err)
 	}
 

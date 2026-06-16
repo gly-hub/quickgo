@@ -161,6 +161,7 @@ func (sr *ServiceRegistrar) Register(ctx context.Context) error {
 }
 
 // StartKeepAlive 启动心跳保持服务活跃
+// Deprecated: registries that need keepalive should own their lease renewal.
 func (sr *ServiceRegistrar) StartKeepAlive(interval time.Duration) {
 	if interval == 0 {
 		interval = 30 * time.Second
@@ -192,6 +193,7 @@ func (sr *ServiceRegistrar) Deregister(ctx context.Context) error {
 	// 停止心跳
 	if sr.keepAliveTicker != nil {
 		sr.keepAliveTicker.Stop()
+		sr.keepAliveTicker = nil
 	}
 
 	if err := sr.registry.Deregister(ctx, sr.serviceName, sr.address); err != nil {

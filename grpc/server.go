@@ -2,8 +2,10 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -24,6 +26,9 @@ type Server struct {
 	options    []grpc.ServerOption
 	services   []ServiceRegister
 	reflection bool
+	mu         sync.RWMutex
+	running    bool
+	stopped    bool
 }
 
 // ServiceRegister 服务注册接口
@@ -79,9 +84,16 @@ func (s *Server) RegisterService(register ServiceRegister) {
 
 // Start 启动gRPC服务器
 func (s *Server) Start() error {
+	if s.isStopped() {
+		return fmt.Errorf("grpc server already stopped")
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
+	if err := s.markRunning(); err != nil {
+		return err
+	}
+	listener := s.getListener()
 
 	// 设置所有服务为健康状态
 	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
@@ -90,16 +102,36 @@ func (s *Server) Start() error {
 	logger.Info(ctx, "gRPC server starting on %s", s.GetAddress())
 
 	// 启动服务器
-	if err := s.server.Serve(s.listener); err != nil {
+	if err := s.server.Serve(listener); err != nil {
+		s.mu.Lock()
+		s.running = false
+		s.listener = nil
+		s.mu.Unlock()
+		if errors.Is(err, grpc.ErrServerStopped) {
+			return nil
+		}
 		logger.Error(ctx, "gRPC server failed to serve: %v", err)
-		return fmt.Errorf("failed to serve: %v", err)
+		return fmt.Errorf("failed to serve: %w", err)
 	}
 
+	s.mu.Lock()
+	s.running = false
+	s.listener = nil
+	s.mu.Unlock()
 	return nil
 }
 
 // Listen 绑定监听地址，但不启动 Serve。
 func (s *Server) Listen() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.stopped {
+		return fmt.Errorf("grpc server already stopped")
+	}
+	if s.running {
+		return fmt.Errorf("grpc server already running")
+	}
 	if s.listener != nil {
 		return nil
 	}
@@ -115,9 +147,16 @@ func (s *Server) Listen() error {
 
 // StartAsync 异步启动gRPC服务器
 func (s *Server) StartAsync() error {
+	if s.isStopped() {
+		return fmt.Errorf("grpc server already stopped")
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
+	if err := s.markRunning(); err != nil {
+		return err
+	}
+	listener := s.getListener()
 
 	// 设置所有服务为健康状态
 	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
@@ -127,17 +166,25 @@ func (s *Server) StartAsync() error {
 
 	// 在goroutine中启动服务器
 	go func() {
-		if err := s.server.Serve(s.listener); err != nil {
-			logger.Error(ctx, "gRPC server error: %v", err)
+		if err := s.server.Serve(listener); err != nil {
+			if !errors.Is(err, grpc.ErrServerStopped) {
+				logger.Error(ctx, "gRPC server error: %v", err)
+			}
 		}
+		s.mu.Lock()
+		s.running = false
+		s.listener = nil
+		s.mu.Unlock()
 	}()
-
 	return nil
 }
 
 // Stop 停止gRPC服务器
 func (s *Server) Stop() error {
 	if s.server == nil {
+		return nil
+	}
+	if s.isStopped() {
 		return nil
 	}
 
@@ -164,12 +211,23 @@ func (s *Server) Stop() error {
 		logger.Info(ctx, "gRPC server gracefully stopped")
 	}
 
+	if err := s.closeListener(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.running = false
+	s.listener = nil
+	s.stopped = true
+	s.mu.Unlock()
 	return nil
 }
 
 // StopWithContext 使用context停止gRPC服务器
 func (s *Server) StopWithContext(ctx context.Context) error {
 	if s.server == nil {
+		return nil
+	}
+	if s.isStopped() {
 		return nil
 	}
 
@@ -188,9 +246,25 @@ func (s *Server) StopWithContext(ctx context.Context) error {
 		// 上下文取消后强制停止
 		s.server.Stop()
 		logger.Warn(ctx, "gRPC server forcefully stopped due to context cancellation")
+		if err := s.closeListener(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.running = false
+		s.listener = nil
+		s.stopped = true
+		s.mu.Unlock()
 		return ctx.Err()
 	case <-stopped:
 		logger.Info(ctx, "gRPC server gracefully stopped")
+		if err := s.closeListener(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.running = false
+		s.listener = nil
+		s.stopped = true
+		s.mu.Unlock()
 		return nil
 	}
 }
@@ -212,5 +286,51 @@ func (s *Server) SetHealthStatus(service string, status grpc_health_v1.HealthChe
 
 // IsRunning 检查服务器是否正在运行
 func (s *Server) IsRunning() bool {
-	return s.listener != nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.running
+}
+
+func (s *Server) markRunning() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return fmt.Errorf("grpc server already stopped")
+	}
+	if s.running {
+		return fmt.Errorf("grpc server already running")
+	}
+	if s.listener == nil {
+		return fmt.Errorf("grpc server listener is not initialized")
+	}
+	s.running = true
+	return nil
+}
+
+func (s *Server) getListener() net.Listener {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.listener
+}
+
+func (s *Server) closeListener() error {
+	s.mu.Lock()
+	listener := s.listener
+	s.running = false
+	s.listener = nil
+	s.mu.Unlock()
+
+	if listener == nil {
+		return nil
+	}
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) isStopped() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.stopped
 }

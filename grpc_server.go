@@ -67,40 +67,18 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	if config == nil {
 		return nil, errors.New("config is nil")
 	}
+	config = cloneGrpcServerConfig(config)
 	applyGrpcServerDefaults(config)
+	if err := validateGrpcServerConfig(config); err != nil {
+		return nil, err
+	}
 
-	var registrar *grpc.ServiceRegistrar
-
-	// etcd 配置是可选的，如果配置了 etcd 则启用服务注册
+	// etcd 配置是可选的；实际 registry 在 Start 阶段创建，避免构造期建立无用连接。
 	if config.Etcd != nil {
-		dialTimeout, err := parseDurationOrDefault(config.Etcd.DialTimeout, defaultEtcdDialTimeout)
-		if err != nil {
+		if _, err := parseDurationOrDefault(config.Etcd.DialTimeout, defaultEtcdDialTimeout); err != nil {
 			logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Etcd.DialTimeout: %v", err)
 			return nil, err
 		}
-		// 创建 etcd 注册中心配置
-		etcdConfig := grpc.EtcdConfig{
-			Endpoints:   config.Etcd.Endpoints,
-			DialTimeout: dialTimeout,
-			Prefix:      config.Etcd.Prefix,
-			TTL:         config.Etcd.TTL,
-			Username:    config.Etcd.Username,
-			Password:    config.Etcd.Password,
-		}
-
-		// 创建 etcd registry
-		registry, err := grpc.NewEtcdRegistry(etcdConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create etcd registry: %w", err)
-		}
-		// 创建服务注册器
-		metadata := map[string]string{
-			"version": "1.0.0",
-			"weight":  "10",
-			"region":  "default",
-		}
-		registrar = grpc.NewServiceRegistrar(registry, config.ServiceName,
-			config.Address, metadata)
 	} else {
 		logger.Info(context.Background(), "Etcd not configured, running in standalone mode (no service discovery)")
 	}
@@ -152,9 +130,8 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	}
 
 	return &GrpcServer{
-		server:    server,
-		config:    config,
-		registrar: registrar,
+		server: server,
+		config: config,
 	}, nil
 }
 
@@ -189,13 +166,6 @@ func (s *GrpcServer) Start() error {
 		return nil
 	}
 
-	// 使用正确的地址注册服务（包含端口）
-	// 需要重新创建 registrar，因为创建时使用的是 config.Address（0.0.0.0），缺少端口
-	// 先关闭旧的 registrar（如果存在）
-	if s.registrar != nil {
-		s.registrar.Close()
-	}
-
 	dialTimeout, err := parseDurationOrDefault(s.config.Etcd.DialTimeout, defaultEtcdDialTimeout)
 	if err != nil {
 		return fmt.Errorf("failed to parse etcd dial timeout: %w", err)
@@ -212,7 +182,7 @@ func (s *GrpcServer) Start() error {
 
 	registry, err := grpc.NewEtcdRegistry(etcdConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create etcd registry: %w", err)
+		return s.rollbackStartedServer(fmt.Errorf("failed to create etcd registry: %w", err))
 	}
 
 	metadata := map[string]string{
@@ -225,13 +195,28 @@ func (s *GrpcServer) Start() error {
 	s.registrar = grpc.NewServiceRegistrar(registry, s.config.ServiceName, serverAddress, metadata)
 
 	if err := s.registrar.Register(context.Background()); err != nil {
-		return fmt.Errorf("failed to register service to etcd: %w", err)
+		return s.rollbackStartedServer(fmt.Errorf("failed to register service to etcd: %w", err))
 	}
 	logger.Info(context.Background(), "Service registered to etcd: service=%s, address=%s", s.config.ServiceName, serverAddress)
 
-	// 启动心跳保持
-	s.registrar.StartKeepAlive(20 * time.Second)
 	return nil
+}
+
+func (s *GrpcServer) rollbackStartedServer(startErr error) error {
+	if s.registrar != nil {
+		if err := s.registrar.Close(); err != nil {
+			logger.Error(context.Background(), "Failed to close registrar during start rollback: %v", err)
+			startErr = errors.Join(startErr, fmt.Errorf("close registrar during rollback: %w", err))
+		}
+		s.registrar = nil
+	}
+	if s.server != nil {
+		if err := s.server.Stop(); err != nil {
+			logger.Error(context.Background(), "Failed to stop grpc server during start rollback: %v", err)
+			startErr = errors.Join(startErr, fmt.Errorf("stop grpc server during rollback: %w", err))
+		}
+	}
+	return startErr
 }
 
 func (s *GrpcServer) Stop() error {
@@ -280,6 +265,38 @@ func applyGrpcServerDefaults(config *GrpcServerConfig) {
 	if config.Port == 0 {
 		config.Port = defaultGrpcServerPort
 	}
+}
+
+func cloneGrpcServerConfig(config *GrpcServerConfig) *GrpcServerConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	if config.Etcd != nil {
+		etcd := *config.Etcd
+		etcd.Endpoints = append([]string(nil), config.Etcd.Endpoints...)
+		cloned.Etcd = &etcd
+	}
+	return &cloned
+}
+
+func validateGrpcServerConfig(config *GrpcServerConfig) error {
+	if config.Port < 0 || config.Port > 65535 {
+		return fmt.Errorf("invalid grpc server port: %d", config.Port)
+	}
+	if config.Etcd == nil {
+		return nil
+	}
+	if config.ServiceName == "" {
+		return errors.New("grpc server serviceName is required when etcd is configured")
+	}
+	if len(config.Etcd.Endpoints) == 0 {
+		return errors.New("grpc server etcd endpoints are required")
+	}
+	if config.Etcd.TTL < 0 {
+		return fmt.Errorf("grpc server etcd ttl must be non-negative: %d", config.Etcd.TTL)
+	}
+	return nil
 }
 
 func parseDurationOrDefault(value string, fallback time.Duration) (time.Duration, error) {

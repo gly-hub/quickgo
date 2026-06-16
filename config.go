@@ -48,16 +48,16 @@ type ConfigLoader struct {
 // env: 环境名称（local, develop, release, production）
 // configPath: 配置文件目录路径（可选，为空时自动查找）
 func NewConfigLoader(env string, configPath ...string) (*ConfigLoader, error) {
-	// 验证环境
-	if !isValidEnv(env) {
-		return nil, fmt.Errorf("unsupported environment: %s, supported: %v", env, []string{EnvLocal, EnvDevelop, EnvRelease, EnvProduction})
-	}
-
 	// 获取系统环境变量（优先级更高）
 	if osEnv := os.Getenv(EnvVarName); osEnv != "" {
 		if isValidEnv(osEnv) {
 			env = osEnv
 		}
+	}
+
+	// 验证最终环境
+	if !isValidEnv(env) {
+		return nil, fmt.Errorf("unsupported environment: %s, supported: %v", env, []string{EnvLocal, EnvDevelop, EnvRelease, EnvProduction})
 	}
 
 	loader := &ConfigLoader{

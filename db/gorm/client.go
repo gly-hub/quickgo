@@ -84,6 +84,7 @@ func NewClient(config *GormConfig) (*Client, error) {
 	if config.ConnMaxLifetime != "" {
 		connMaxLifetime, err := time.ParseDuration(config.ConnMaxLifetime)
 		if err != nil {
+			sqlDB.Close()
 			return nil, fmt.Errorf("failed to parse ConnMaxLifetime %s: %w", config.ConnMaxLifetime, err)
 		}
 		if connMaxLifetime > 0 {
@@ -95,6 +96,7 @@ func NewClient(config *GormConfig) (*Client, error) {
 	if config.ConnMaxIdleTime != "" {
 		connMaxIdleTime, err := time.ParseDuration(config.ConnMaxIdleTime)
 		if err != nil {
+			sqlDB.Close()
 			return nil, fmt.Errorf("failed to parse ConnMaxIdleTime %s: %w", config.ConnMaxIdleTime, err)
 		}
 		if connMaxIdleTime > 0 {
@@ -118,9 +120,17 @@ func NewClient(config *GormConfig) (*Client, error) {
 		logger.Info(ctx, "Configuring read replicas: name=%s, count=%d", config.Name, len(config.Slaves))
 
 		var slaveDialectors []gorm.Dialector
+		var probeSQLDBs []interface{ Close() error }
+		closeProbeSQLDBs := func() {
+			for _, probeSQLDB := range probeSQLDBs {
+				_ = probeSQLDB.Close()
+			}
+			probeSQLDBs = nil
+		}
 		for i, slave := range config.Slaves {
 			slaveDSN, err := buildSlaveDSN(config.Master.Type, slave)
 			if err != nil {
+				closeProbeSQLDBs()
 				sqlDB.Close()
 				return nil, fmt.Errorf("failed to build slave[%d] DSN: %w", i, err)
 			}
@@ -136,6 +146,7 @@ func NewClient(config *GormConfig) (*Client, error) {
 			case DatabaseTypeSQLServer:
 				slaveDialector = sqlserver.Open(slaveDSN)
 			default:
+				closeProbeSQLDBs()
 				sqlDB.Close()
 				return nil, fmt.Errorf("unsupported database type: %s", config.Master.Type)
 			}
@@ -143,23 +154,26 @@ func NewClient(config *GormConfig) (*Client, error) {
 			// 测试从库连接（确保从库可用）
 			slaveDB, err := gorm.Open(slaveDialector, gormConfig)
 			if err != nil {
+				closeProbeSQLDBs()
 				sqlDB.Close()
 				return nil, fmt.Errorf("failed to connect to slave[%d] (read replica connection failed): %w", i, err)
 			}
 
 			slaveSQLDB, err := slaveDB.DB()
 			if err != nil {
+				closeProbeSQLDBs()
 				sqlDB.Close()
 				return nil, fmt.Errorf("failed to get slave[%d] sql.DB: %w", i, err)
 			}
+			probeSQLDBs = append(probeSQLDBs, slaveSQLDB)
 
 			// 测试从库连接
 			slavePingCtx, slavePingCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer slavePingCancel()
 
 			if err := slaveSQLDB.PingContext(slavePingCtx); err != nil {
+				closeProbeSQLDBs()
 				sqlDB.Close()
-				slaveSQLDB.Close()
 				return nil, fmt.Errorf("failed to ping slave[%d] (read replica connection test failed): %w", i, err)
 			}
 
@@ -175,9 +189,11 @@ func NewClient(config *GormConfig) (*Client, error) {
 			TraceResolverMode: true,
 		}))
 		if err != nil {
+			closeProbeSQLDBs()
 			sqlDB.Close()
 			return nil, fmt.Errorf("failed to register db resolver: %w", err)
 		}
+		closeProbeSQLDBs()
 
 		logger.Info(ctx, "Read replicas configured successfully: name=%s, count=%d", config.Name, len(slaveDialectors))
 	}

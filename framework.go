@@ -200,7 +200,12 @@ func ConfigOptionWithRedis(config *redis.RedisManagerConfig) FrameworkOption {
 // ConfigOptionWithTracing 配置链路追踪
 func ConfigOptionWithTracing(config *tracing.Config) FrameworkOption {
 	return func(c *FrameworkConfig) {
-		c.Tracing = config
+		if config == nil {
+			c.Tracing = nil
+			return
+		}
+		cloned := *config
+		c.Tracing = &cloned
 	}
 }
 
@@ -306,20 +311,44 @@ func (f *Framework) Start() error {
 	}
 
 	ctx := context.Background()
+	var cleanup []func()
+	startedComponents := make([]Component, 0, len(f.components))
+	startFailed := func(format string, args ...interface{}) error {
+		for i := len(startedComponents) - 1; i >= 0; i-- {
+			component := startedComponents[i]
+			if err := component.Stop(ctx); err != nil {
+				logger.Error(ctx, "Failed to rollback component %s after start failure: %v", component.Name(), err)
+			}
+		}
+		for i := len(cleanup) - 1; i >= 0; i-- {
+			cleanup[i]()
+		}
+		return fmt.Errorf(format, args...)
+	}
 
 	// 1. 启动 gRPC Server
 	if f.grpcServer != nil {
 		if err := f.grpcServer.Start(); err != nil {
 			return fmt.Errorf("failed to start grpc server: %w", err)
 		}
+		cleanup = append(cleanup, func() {
+			if err := f.grpcServer.Stop(); err != nil {
+				logger.Error(ctx, "Failed to rollback grpc server after start failure: %v", err)
+			}
+		})
 		logger.Info(ctx, "gRPC server started")
 	}
 
 	// 2. 启动 HTTP Server
 	if f.httpServer != nil {
 		if err := f.httpServer.StartAsync(); err != nil {
-			return fmt.Errorf("failed to start http server: %w", err)
+			return startFailed("failed to start http server: %w", err)
 		}
+		cleanup = append(cleanup, func() {
+			if err := f.httpServer.Stop(); err != nil {
+				logger.Error(ctx, "Failed to rollback http server after start failure: %v", err)
+			}
+		})
 		logger.Info(ctx, "HTTP server started")
 	}
 
@@ -327,8 +356,9 @@ func (f *Framework) Start() error {
 	for _, component := range f.components {
 		if component.IsEnabled() {
 			if err := component.Start(ctx); err != nil {
-				return fmt.Errorf("failed to start component %s: %w", component.Name(), err)
+				return startFailed("failed to start component %s: %w", component.Name(), err)
 			}
+			startedComponents = append(startedComponents, component)
 		}
 	}
 
@@ -351,6 +381,7 @@ func (f *Framework) Stop() error {
 	}
 
 	ctx := context.Background()
+	var errs []error
 
 	// 按相反顺序停止组件
 
@@ -359,6 +390,7 @@ func (f *Framework) Stop() error {
 		if component.IsEnabled() {
 			if err := component.Stop(ctx); err != nil {
 				logger.Error(ctx, "Failed to stop component %s: %v", component.Name(), err)
+				errs = append(errs, fmt.Errorf("component %s: %w", component.Name(), err))
 			}
 		}
 	}
@@ -367,6 +399,7 @@ func (f *Framework) Stop() error {
 	if f.httpServer != nil {
 		if err := f.httpServer.Stop(); err != nil {
 			logger.Error(ctx, "Failed to stop http server: %v", err)
+			errs = append(errs, fmt.Errorf("http server: %w", err))
 		}
 	}
 
@@ -374,6 +407,7 @@ func (f *Framework) Stop() error {
 	if f.grpcServer != nil {
 		if err := f.grpcServer.Stop(); err != nil {
 			logger.Error(ctx, "Failed to stop grpc server: %v", err)
+			errs = append(errs, fmt.Errorf("grpc server: %w", err))
 		}
 	}
 
@@ -381,6 +415,7 @@ func (f *Framework) Stop() error {
 	if f.grpcClientMgr != nil {
 		if err := f.grpcClientMgr.CloseAll(); err != nil {
 			logger.Error(ctx, "Failed to close grpc client manager: %v", err)
+			errs = append(errs, fmt.Errorf("grpc client manager: %w", err))
 		}
 	}
 
@@ -388,18 +423,21 @@ func (f *Framework) Stop() error {
 	if f.redisManager != nil {
 		if err := f.redisManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close redis manager: %v", err)
+			errs = append(errs, fmt.Errorf("redis manager: %w", err))
 		}
 	}
 
 	if f.mongodbManager != nil {
 		if err := f.mongodbManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close mongodb manager: %v", err)
+			errs = append(errs, fmt.Errorf("mongodb manager: %w", err))
 		}
 	}
 
 	if f.gormManager != nil {
 		if err := f.gormManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close gorm manager: %v", err)
+			errs = append(errs, fmt.Errorf("gorm manager: %w", err))
 		}
 	}
 
@@ -408,12 +446,16 @@ func (f *Framework) Stop() error {
 	if f.config.Tracing != nil && f.config.Tracing.Enabled {
 		if err := tracing.Shutdown(ctx); err != nil {
 			logger.Error(ctx, "Failed to shutdown tracing: %v", err)
+			errs = append(errs, fmt.Errorf("tracing: %w", err))
 		} else {
 			logger.Info(ctx, "Tracing shutdown successfully")
 		}
 	}
 
 	logger.Info(ctx, "Framework stopped")
+	if len(errs) > 0 {
+		return fmt.Errorf("framework stopped with errors: %w", errors.Join(errs...))
+	}
 	return nil
 }
 
@@ -532,8 +574,7 @@ func (f *Framework) initLogger(ctx context.Context) error {
 
 	// 设置输出方式
 	if cfg.Output == "file" && cfg.File != "" {
-		// 文件输出需要单独配置，这里先使用控制台输出
-		// TODO: 支持文件输出配置
+		loggerConfig.Output = cfg.File
 	}
 
 	if err := logger.Init(loggerConfig); err != nil {
@@ -615,41 +656,43 @@ func (f *Framework) initTracing(ctx context.Context) error {
 	if f.config.Tracing == nil {
 		return nil
 	}
+	cfg := *f.config.Tracing
 
 	// 如果未设置服务名称，使用应用名称
-	if f.config.Tracing.ServiceName == "" {
-		f.config.Tracing.ServiceName = f.config.App.Name
+	if cfg.ServiceName == "" {
+		cfg.ServiceName = f.config.App.Name
 	}
-	if f.config.Tracing.ServiceName == "" {
-		f.config.Tracing.ServiceName = "quickgo-service"
+	if cfg.ServiceName == "" {
+		cfg.ServiceName = "quickgo-service"
 	}
 
 	// 如果未设置服务版本，使用应用版本
-	if f.config.Tracing.ServiceVersion == "" {
-		f.config.Tracing.ServiceVersion = f.config.App.Version
+	if cfg.ServiceVersion == "" {
+		cfg.ServiceVersion = f.config.App.Version
 	}
-	if f.config.Tracing.ServiceVersion == "" {
-		f.config.Tracing.ServiceVersion = "1.0.0"
+	if cfg.ServiceVersion == "" {
+		cfg.ServiceVersion = "1.0.0"
 	}
 
 	// 如果未设置环境，使用应用环境
-	if f.config.Tracing.Environment == "" {
-		f.config.Tracing.Environment = f.config.App.Env
+	if cfg.Environment == "" {
+		cfg.Environment = f.config.App.Env
 	}
-	if f.config.Tracing.Environment == "" {
-		f.config.Tracing.Environment = "development"
+	if cfg.Environment == "" {
+		cfg.Environment = "development"
 	}
 
-	if err := tracing.Init(f.config.Tracing); err != nil {
+	if err := tracing.Init(&cfg); err != nil {
 		return fmt.Errorf("failed to initialize tracing: %w", err)
 	}
+	f.config.Tracing = &cfg
 
 	logger.Info(ctx, "Tracing initialized: service=%s, version=%s, environment=%s, otlp_enabled=%v, otlp_endpoint=%s",
-		f.config.Tracing.ServiceName,
-		f.config.Tracing.ServiceVersion,
-		f.config.Tracing.Environment,
-		f.config.Tracing.OTLP.Enabled,
-		f.config.Tracing.OTLP.Endpoint,
+		cfg.ServiceName,
+		cfg.ServiceVersion,
+		cfg.Environment,
+		cfg.OTLP.Enabled,
+		cfg.OTLP.Endpoint,
 	)
 
 	return nil
