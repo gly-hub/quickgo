@@ -68,7 +68,7 @@ func TestGrpcServerRegisterAddressPrefersExplicitValue(t *testing.T) {
 	}
 }
 
-func TestGrpcServerRegisterAddressRequiresExplicitAddressForEtcdWildcardListen(t *testing.T) {
+func TestGrpcServerRegisterAddressAllowsEtcdWildcardListen(t *testing.T) {
 	t.Setenv("SERVER_IP", "")
 
 	server, err := NewGrpcServer(&GrpcServerConfig{
@@ -80,8 +80,12 @@ func TestGrpcServerRegisterAddressRequiresExplicitAddressForEtcdWildcardListen(t
 		t.Fatalf("NewGrpcServer failed: %v", err)
 	}
 
-	if _, err := server.registerAddress(); err == nil || !strings.Contains(err.Error(), "registerAddress") {
-		t.Fatalf("expected register address error, got %v", err)
+	got, err := server.registerAddress()
+	if err != nil {
+		t.Fatalf("registerAddress failed: %v", err)
+	}
+	if got == "" || strings.HasPrefix(got, "0.0.0.0:") {
+		t.Fatalf("expected concrete register address, got %q", got)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"io"
 	"reflect"
 	"strings"
-	"time"
 
 	"github.com/team-dandelion/quickgo/gerr"
 	"github.com/team-dandelion/quickgo/http"
@@ -430,7 +429,4 @@ func (b *BaseHandler) SetSSEStream(ctx *fiber.Ctx) {
 	ctx.Set("Access-Control-Allow-Origin", "*")
 	ctx.Set("Transfer-Encoding", "chunked")
 	ctx.Set("X-Accel-Buffering", "no")
-	ctx.App().Server().WriteTimeout = 3600 * time.Second
-	ctx.App().Server().ReadTimeout = 3600 * time.Second
-	ctx.App().Server().MaxKeepaliveDuration = 3600 * time.Second
 }

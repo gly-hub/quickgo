@@ -44,28 +44,13 @@ func NewClient(config *GormConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to build master DSN: %w", err)
 	}
 
-	// 根据数据库类型选择驱动
-	var dialector gorm.Dialector
-	switch config.Master.Type {
-	case DatabaseTypeMySQL:
-		dialector = gormmysql.Open(masterDSN)
-	case DatabaseTypePostgreSQL:
-		dialector = postgres.Open(masterDSN)
-	case DatabaseTypeSQLite:
-		dialector = sqlite.Open(masterDSN)
-	case DatabaseTypeSQLServer:
-		dialector = sqlserver.Open(masterDSN)
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", config.Master.Type)
-	}
-
-	// GORM 配置
-	gormConfig := &gorm.Config{
-		Logger: newLogger(config),
+	dialector, err := newDialector(config.Master.Type, masterDSN)
+	if err != nil {
+		return nil, err
 	}
 
 	// 打开主库连接
-	db, err := gorm.Open(dialector, gormConfig)
+	db, err := gorm.Open(dialector, newGormConfig(config))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database connection (check database is running and accessible): %w", err)
 	}
@@ -123,61 +108,50 @@ func NewClient(config *GormConfig) (*Client, error) {
 		logger.Info(ctx, "Configuring read replicas: name=%s, count=%d", config.Name, len(config.Slaves))
 
 		var slaveDialectors []gorm.Dialector
-		var probeSQLDBs []interface{ Close() error }
-		closeProbeSQLDBs := func() {
-			for _, probeSQLDB := range probeSQLDBs {
-				_ = probeSQLDB.Close()
-			}
-			probeSQLDBs = nil
-		}
 		for i, slave := range config.Slaves {
 			slaveDSN, err := buildSlaveDSN(config.Master.Type, slave)
 			if err != nil {
-				closeProbeSQLDBs()
 				sqlDB.Close()
 				return nil, fmt.Errorf("failed to build slave[%d] DSN: %w", i, err)
 			}
 
-			var slaveDialector gorm.Dialector
-			switch config.Master.Type {
-			case DatabaseTypeMySQL:
-				slaveDialector = gormmysql.Open(slaveDSN)
-			case DatabaseTypePostgreSQL:
-				slaveDialector = postgres.Open(slaveDSN)
-			case DatabaseTypeSQLite:
-				slaveDialector = sqlite.Open(slaveDSN)
-			case DatabaseTypeSQLServer:
-				slaveDialector = sqlserver.Open(slaveDSN)
-			default:
-				closeProbeSQLDBs()
+			probeDialector, err := newDialector(config.Master.Type, slaveDSN)
+			if err != nil {
 				sqlDB.Close()
-				return nil, fmt.Errorf("unsupported database type: %s", config.Master.Type)
+				return nil, err
 			}
 
 			// 测试从库连接（确保从库可用）
-			slaveDB, err := gorm.Open(slaveDialector, gormConfig)
+			slaveDB, err := gorm.Open(probeDialector, newGormConfig(config))
 			if err != nil {
-				closeProbeSQLDBs()
 				sqlDB.Close()
 				return nil, fmt.Errorf("failed to connect to slave[%d] (read replica connection failed): %w", i, err)
 			}
 
 			slaveSQLDB, err := slaveDB.DB()
 			if err != nil {
-				closeProbeSQLDBs()
 				sqlDB.Close()
 				return nil, fmt.Errorf("failed to get slave[%d] sql.DB: %w", i, err)
 			}
-			probeSQLDBs = append(probeSQLDBs, slaveSQLDB)
 
 			// 测试从库连接
 			slavePingCtx, slavePingCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer slavePingCancel()
-
-			if err := slaveSQLDB.PingContext(slavePingCtx); err != nil {
-				closeProbeSQLDBs()
+			pingErr := slaveSQLDB.PingContext(slavePingCtx)
+			slavePingCancel()
+			closeErr := slaveSQLDB.Close()
+			if pingErr != nil {
 				sqlDB.Close()
-				return nil, fmt.Errorf("failed to ping slave[%d] (read replica connection test failed): %w", i, err)
+				return nil, fmt.Errorf("failed to ping slave[%d] (read replica connection test failed): %w", i, pingErr)
+			}
+			if closeErr != nil {
+				sqlDB.Close()
+				return nil, fmt.Errorf("failed to close slave[%d] probe connection: %w", i, closeErr)
+			}
+
+			slaveDialector, err := newDialector(config.Master.Type, slaveDSN)
+			if err != nil {
+				sqlDB.Close()
+				return nil, err
 			}
 
 			// 从库连接成功，添加到列表
@@ -192,11 +166,9 @@ func NewClient(config *GormConfig) (*Client, error) {
 			TraceResolverMode: true,
 		}))
 		if err != nil {
-			closeProbeSQLDBs()
 			sqlDB.Close()
 			return nil, fmt.Errorf("failed to register db resolver: %w", err)
 		}
-		closeProbeSQLDBs()
 
 		logger.Info(ctx, "Read replicas configured successfully: name=%s, count=%d", config.Name, len(slaveDialectors))
 	}
@@ -208,6 +180,27 @@ func NewClient(config *GormConfig) (*Client, error) {
 		db:     db,
 		config: config,
 	}, nil
+}
+
+func newGormConfig(config *GormConfig) *gorm.Config {
+	return &gorm.Config{
+		Logger: newLogger(config),
+	}
+}
+
+func newDialector(dbType DatabaseType, dsn string) (gorm.Dialector, error) {
+	switch dbType {
+	case DatabaseTypeMySQL:
+		return gormmysql.Open(dsn), nil
+	case DatabaseTypePostgreSQL:
+		return postgres.Open(dsn), nil
+	case DatabaseTypeSQLite:
+		return sqlite.Open(dsn), nil
+	case DatabaseTypeSQLServer:
+		return sqlserver.Open(dsn), nil
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", dbType)
+	}
 }
 
 // GetDB 获取 GORM DB 实例

@@ -2,6 +2,7 @@ package gorm
 
 import (
 	"net/url"
+	"path/filepath"
 	"testing"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -128,5 +129,27 @@ func TestBuildSQLServerDSNEncodesCredentialsAndParams(t *testing.T) {
 	}
 	if got := u.Query().Get("app name"); got != "quick go" {
 		t.Fatalf("unexpected app name: %q", got)
+	}
+}
+
+func TestNewClientWithReadReplicaKeepsSourceOpen(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewClient(&GormConfig{
+		Name: "test",
+		Master: MasterConfig{
+			Type:     DatabaseTypeSQLite,
+			Database: filepath.Join(dir, "master.db"),
+		},
+		Slaves: []SlaveConfig{
+			{Database: filepath.Join(dir, "replica.db")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	if err := client.GetDB().Exec("CREATE TABLE messages (id integer primary key, body text)").Error; err != nil {
+		t.Fatalf("expected source connection to remain usable after replica setup, got %v", err)
 	}
 }

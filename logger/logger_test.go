@@ -277,6 +277,35 @@ func TestErrorLog(t *testing.T) {
 	}
 }
 
+func TestErrorLogFormatsErrorPlaceholder(t *testing.T) {
+	tmpFile, _ := os.CreateTemp("", "logger_test_*.log")
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	logger, _ := NewLogger(Config{
+		Level:  LevelError,
+		Output: tmpFile.Name(),
+	})
+	defer logger.Close()
+
+	ctx := context.Background()
+	testErr := errors.New("context deadline exceeded")
+	logger.Error(ctx, "failed to connect: address=%s, error=%v", "etcd://ai-agent", testErr)
+
+	content, _ := os.ReadFile(tmpFile.Name())
+	var entry LogEntry
+	json.Unmarshal(content, &entry)
+
+	if entry.Error != "context deadline exceeded" {
+		t.Errorf("Expected error 'context deadline exceeded', got '%s'", entry.Error)
+	}
+
+	expected := "failed to connect: address=etcd://ai-agent, error=context deadline exceeded"
+	if entry.Message != expected {
+		t.Errorf("Expected message %q, got %q", expected, entry.Message)
+	}
+}
+
 // TestSetLevel 测试设置日志级别
 func TestSetLevel(t *testing.T) {
 	logger, _ := NewLogger(Config{

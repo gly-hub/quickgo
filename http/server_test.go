@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -36,6 +37,44 @@ func TestServerStopAfterListenClosesListener(t *testing.T) {
 		t.Fatalf("expected listener address to be released after Stop, got %v", err)
 	}
 	_ = listener.Close()
+}
+
+func TestServerDoesNotSetDefaultReadWriteTimeouts(t *testing.T) {
+	server, err := NewServer(Config{
+		FiberConfig: fiber.Config{
+			DisableStartupMessage: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	if got := server.GetApp().Server().ReadTimeout; got != 0 {
+		t.Fatalf("expected default read timeout to remain unset, got %s", got)
+	}
+	if got := server.GetApp().Server().WriteTimeout; got != 0 {
+		t.Fatalf("expected default write timeout to remain unset, got %s", got)
+	}
+}
+
+func TestServerPreservesConfiguredReadWriteTimeouts(t *testing.T) {
+	server, err := NewServer(Config{
+		FiberConfig: fiber.Config{
+			DisableStartupMessage: true,
+			ReadTimeout:           3 * time.Second,
+			WriteTimeout:          4 * time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	if got := server.GetApp().Server().ReadTimeout; got != 3*time.Second {
+		t.Fatalf("expected configured read timeout, got %s", got)
+	}
+	if got := server.GetApp().Server().WriteTimeout; got != 4*time.Second {
+		t.Fatalf("expected configured write timeout, got %s", got)
+	}
 }
 
 func TestServerDefaultMiddlewaresCanBeDisabledIndividually(t *testing.T) {
