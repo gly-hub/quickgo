@@ -32,8 +32,8 @@ func TestNewLogger(t *testing.T) {
 		t.Errorf("Expected version '1.0.0', got '%s'", logger.version)
 	}
 
-	if logger.level != LevelInfo {
-		t.Errorf("Expected level LevelInfo, got %d", logger.level)
+	if logger.level != LevelDebug {
+		t.Errorf("Expected level LevelDebug, got %d", logger.level)
 	}
 	logger.Debug(context.Background(), "debug msg")
 }

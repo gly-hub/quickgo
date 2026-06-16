@@ -2,7 +2,10 @@ package grpc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -28,6 +31,10 @@ type ServiceDiscovery interface {
 	Watch(ctx context.Context, serviceName string, callback func([]string)) error
 	// Close 关闭服务发现
 	Close() error
+}
+
+type discoveryKeyer interface {
+	DiscoveryKey() string
 }
 
 // StaticResolver 静态服务发现（直接指定地址列表）
@@ -79,6 +86,16 @@ func (r *StaticResolver) UpdateAddresses(addresses []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.addresses = addresses
+}
+
+// DiscoveryKey returns a stable key for enforcing one config per resolver scheme.
+func (r *StaticResolver) DiscoveryKey() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	addresses := append([]string(nil), r.addresses...)
+	sort.Strings(addresses)
+	return "static:" + strings.Join(addresses, ",")
 }
 
 // resolverBuilder gRPC resolver builder
@@ -235,29 +252,54 @@ func (r *serviceResolver) Close() {
 	}
 }
 
-// registeredSchemes 记录已注册的 scheme，避免重复注册
-var registeredSchemes = make(map[string]bool)
+type registeredResolver struct {
+	key string
+	sd  ServiceDiscovery
+}
+
+// registeredSchemes 记录已注册的 scheme 配置，避免同一 scheme 混用不同配置。
+var registeredSchemes = make(map[string]registeredResolver)
 var registeredSchemesMu sync.Mutex
 
 // RegisterResolver 注册 resolver（幂等，同一 scheme 只注册一次）
-func RegisterResolver(scheme string, sd ServiceDiscovery) {
+func RegisterResolver(scheme string, sd ServiceDiscovery) error {
+	_, err := RegisterResolverAndGet(scheme, sd)
+	return err
+}
+
+// RegisterResolverAndGet 注册 resolver，并返回该 scheme 实际使用的全局 resolver。
+func RegisterResolverAndGet(scheme string, sd ServiceDiscovery) (ServiceDiscovery, error) {
 	registeredSchemesMu.Lock()
 	defer registeredSchemesMu.Unlock()
 
+	key := resolverConfigKey(sd)
+
 	// 检查是否已经注册过
-	if registeredSchemes[scheme] {
+	if registered, ok := registeredSchemes[scheme]; ok {
+		if registered.key != key {
+			return nil, fmt.Errorf("resolver scheme %s already registered with a different config", scheme)
+		}
 		logger.Debug(context.Background(), "Resolver already registered, skipping: scheme=%s", scheme)
-		return
+		return registered.sd, nil
 	}
 
 	builder := newResolverBuilder(scheme, sd)
 	resolver.Register(builder)
-	registeredSchemes[scheme] = true
+	registeredSchemes[scheme] = registeredResolver{key: key, sd: sd}
 	logger.Info(context.Background(), "Resolver registered: scheme=%s", scheme)
+	return sd, nil
 }
 
 // RegisterStaticResolver 注册静态服务发现
-func RegisterStaticResolver(addresses []string) {
+func RegisterStaticResolver(addresses []string) error {
 	sd := NewStaticResolver(addresses)
-	RegisterResolver(StaticScheme, sd)
+	return RegisterResolver(StaticScheme, sd)
+}
+
+func resolverConfigKey(sd ServiceDiscovery) string {
+	if keyer, ok := sd.(discoveryKeyer); ok {
+		sum := sha256.Sum256([]byte(keyer.DiscoveryKey()))
+		return hex.EncodeToString(sum[:])
+	}
+	return fmt.Sprintf("%T:%p", sd, sd)
 }

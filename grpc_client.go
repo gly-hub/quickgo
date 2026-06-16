@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
 	"github.com/team-dandelion/quickgo/grpc"
 	"github.com/team-dandelion/quickgo/logger"
 	"sync"
@@ -59,11 +60,12 @@ type GrpcClientManager struct {
 
 // clientPool 连接池
 type clientPool struct {
-	serviceName string         // 服务名称
-	clients     []*grpc.Client // 连接池中的客户端
-	index       uint64         // 轮询索引（使用原子操作）
-	mu          sync.RWMutex
-	unhealthy   []int // 不健康的连接索引
+	serviceName  string         // 服务名称
+	clients      []*grpc.Client // 连接池中的客户端
+	index        uint64         // 轮询索引（使用原子操作）
+	mu           sync.RWMutex
+	unhealthy    []int        // 不健康的连接索引
+	reconnecting map[int]bool // 正在重连的连接索引
 }
 
 // NewGrpcClientManager 创建 gRPC 客户端管理器
@@ -134,9 +136,16 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 			return nil, fmt.Errorf("failed to create etcd resolver: %w", err)
 		}
 
-		// 注册 etcd resolver
-		grpc.RegisterResolver(grpc.EtcdScheme, resolver)
-		manager.etcdResolver = resolver
+		// 注册 etcd resolver；同一 scheme 只能使用同一份配置。
+		registeredResolver, err := grpc.RegisterResolverAndGet(grpc.EtcdScheme, resolver)
+		if err != nil {
+			resolver.Close()
+			return nil, err
+		}
+		if registeredResolver != resolver {
+			resolver.Close()
+		}
+		manager.etcdResolver = registeredResolver.(*grpc.EtcdResolver)
 	}
 
 	return manager, nil
@@ -303,9 +312,10 @@ func (m *GrpcClientManager) createClientPool(ctx context.Context, serviceName st
 	}
 
 	pool := &clientPool{
-		serviceName: serviceName,
-		clients:     make([]*grpc.Client, 0, poolSize),
-		unhealthy:   make([]int, 0),
+		serviceName:  serviceName,
+		clients:      make([]*grpc.Client, 0, poolSize),
+		unhealthy:    make([]int, 0),
+		reconnecting: make(map[int]bool),
 	}
 
 	for i := 0; i < poolSize; i++ {
@@ -341,9 +351,15 @@ func (p *clientPool) getClient() *grpc.Client {
 		return nil
 	}
 
-	// 使用原子操作实现轮询
-	idx := atomic.AddUint64(&p.index, 1) - 1
-	return p.clients[idx%uint64(len(p.clients))]
+	start := atomic.AddUint64(&p.index, 1) - 1
+	for offset := 0; offset < len(p.clients); offset++ {
+		idx := int((start + uint64(offset)) % uint64(len(p.clients)))
+		client := p.clients[idx]
+		if client != nil && client.IsConnected() {
+			return client
+		}
+	}
+	return nil
 }
 
 // close 关闭连接池中的所有连接
@@ -353,16 +369,33 @@ func (p *clientPool) close() error {
 
 	var errs []error
 	for _, client := range p.clients {
+		if client == nil {
+			continue
+		}
 		if err := client.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	p.clients = nil
+	p.unhealthy = nil
+	p.reconnecting = make(map[int]bool)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to close some clients: %v", errs)
 	}
 	return nil
+}
+
+func (p *clientPool) finishReconnect(idx int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finishReconnectLocked(idx)
+}
+
+func (p *clientPool) finishReconnectLocked(idx int) {
+	if p.reconnecting != nil {
+		delete(p.reconnecting, idx)
+	}
 }
 
 // ConnectAll 连接所有已注册的客户端
@@ -432,13 +465,6 @@ func (m *GrpcClientManager) CloseAll() error {
 
 	// 清空
 	m.clientPools = make(map[string]*clientPool)
-
-	// 关闭共享的 etcd resolver
-	if m.etcdResolver != nil {
-		if err := m.etcdResolver.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("etcd resolver: %w", err))
-		}
-	}
 
 	if len(errors) > 0 {
 		return fmt.Errorf("failed to close some clients: %v", errors)
@@ -578,9 +604,21 @@ func (m *GrpcClientManager) checkPoolHealth(serviceName string, pool *clientPool
 
 	pool.unhealthy = unhealthyIndices
 
+	reconnectIndices := make([]int, 0, len(unhealthyIndices))
+	for _, idx := range unhealthyIndices {
+		if pool.reconnecting == nil {
+			pool.reconnecting = make(map[int]bool)
+		}
+		if pool.reconnecting[idx] {
+			continue
+		}
+		pool.reconnecting[idx] = true
+		reconnectIndices = append(reconnectIndices, idx)
+	}
+
 	// 如果有不健康的连接，尝试重连
-	if len(unhealthyIndices) > 0 {
-		go m.reconnectUnhealthyClients(serviceName, pool, unhealthyIndices)
+	if len(reconnectIndices) > 0 {
+		go m.reconnectUnhealthyClients(serviceName, pool, reconnectIndices)
 	}
 }
 
@@ -595,6 +633,7 @@ func (m *GrpcClientManager) reconnectUnhealthyClients(serviceName string, pool *
 
 		pool.mu.Lock()
 		if idx >= len(pool.clients) {
+			pool.finishReconnectLocked(idx)
 			pool.mu.Unlock()
 			continue
 		}
@@ -611,6 +650,7 @@ func (m *GrpcClientManager) reconnectUnhealthyClients(serviceName string, pool *
 		newClient, err := m.createClient(serviceName)
 		if err != nil {
 			logger.Error(context.Background(), "Failed to create new client for reconnection: service=%s, index=%d, error=%v", serviceName, idx, err)
+			pool.finishReconnect(idx)
 			time.Sleep(m.reconnectInterval)
 			continue
 		}
@@ -621,6 +661,7 @@ func (m *GrpcClientManager) reconnectUnhealthyClients(serviceName string, pool *
 			cancel()
 			logger.Error(context.Background(), "Failed to reconnect client: service=%s, index=%d, error=%v", serviceName, idx, err)
 			newClient.Close()
+			pool.finishReconnect(idx)
 			time.Sleep(m.reconnectInterval)
 			continue
 		}
@@ -637,8 +678,10 @@ func (m *GrpcClientManager) reconnectUnhealthyClients(serviceName string, pool *
 					break
 				}
 			}
+			pool.finishReconnectLocked(idx)
 		} else {
 			newClient.Close()
+			pool.finishReconnectLocked(idx)
 		}
 		pool.mu.Unlock()
 
@@ -782,8 +825,16 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 			return nil, err
 		}
 
-		// 注册 etcd resolver
-		grpc.RegisterResolver(grpc.EtcdScheme, etcdResolver)
+		// 注册 etcd resolver；同一 scheme 只能使用同一份配置。
+		registeredResolver, err := grpc.RegisterResolverAndGet(grpc.EtcdScheme, etcdResolver)
+		if err != nil {
+			etcdResolver.Close()
+			return nil, err
+		}
+		if registeredResolver != etcdResolver {
+			etcdResolver.Close()
+		}
+		etcdResolver = registeredResolver.(*grpc.EtcdResolver)
 
 		// 设置服务发现
 		clientConfig.ServiceDiscovery = etcdResolver
@@ -850,14 +901,6 @@ func (c *GrpcClient) Close() error {
 	if c.client != nil {
 		if err := c.client.Close(); err != nil {
 			logger.Error(context.Background(), "Failed to close grpc client: %v", err)
-			return err
-		}
-	}
-
-	// 关闭 etcd resolver
-	if c.etcdResolver != nil {
-		if err := c.etcdResolver.Close(); err != nil {
-			logger.Error(context.Background(), "Failed to close etcd resolver: %v", err)
 			return err
 		}
 	}
