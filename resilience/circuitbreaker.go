@@ -41,6 +41,7 @@ type CircuitBreaker struct {
 	state         CircuitState  // 当前状态
 	failureCount  int           // 连续失败次数
 	successCount  int           // 半开状态下连续成功次数
+	halfOpenReqs  int           // 半开状态下正在执行的探测请求数
 	lastFailure   time.Time     // 最后失败时间
 	lastStateTime time.Time     // 最后状态变化时间
 	config        CircuitConfig // 配置
@@ -109,11 +110,15 @@ func (cb *CircuitBreaker) Allow() error {
 		// 检查是否可以进入半开状态
 		if time.Since(cb.lastStateTime) >= cb.config.OpenDuration {
 			cb.toHalfOpen()
+			cb.halfOpenReqs++
 			return nil
 		}
 		return ErrCircuitOpen
 	case StateHalfOpen:
-		// 半开状态限制并发
+		if cb.halfOpenReqs >= cb.config.HalfOpenMaxReqs {
+			return ErrCircuitOpen
+		}
+		cb.halfOpenReqs++
 		return nil
 	}
 
@@ -129,6 +134,7 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	case StateClosed:
 		cb.failureCount = 0
 	case StateHalfOpen:
+		cb.finishHalfOpenRequest()
 		cb.successCount++
 		if cb.successCount >= cb.config.SuccessThreshold {
 			cb.toClosed()
@@ -150,6 +156,7 @@ func (cb *CircuitBreaker) RecordFailure() {
 			cb.toOpen()
 		}
 	case StateHalfOpen:
+		cb.finishHalfOpenRequest()
 		cb.toOpen()
 	}
 }
@@ -183,6 +190,7 @@ func (cb *CircuitBreaker) toOpen() {
 	cb.state = StateOpen
 	cb.lastStateTime = time.Now()
 	cb.successCount = 0
+	cb.halfOpenReqs = 0
 }
 
 func (cb *CircuitBreaker) toHalfOpen() {
@@ -190,6 +198,7 @@ func (cb *CircuitBreaker) toHalfOpen() {
 	cb.lastStateTime = time.Now()
 	cb.successCount = 0
 	cb.failureCount = 0
+	cb.halfOpenReqs = 0
 }
 
 func (cb *CircuitBreaker) toClosed() {
@@ -197,6 +206,13 @@ func (cb *CircuitBreaker) toClosed() {
 	cb.lastStateTime = time.Now()
 	cb.failureCount = 0
 	cb.successCount = 0
+	cb.halfOpenReqs = 0
+}
+
+func (cb *CircuitBreaker) finishHalfOpenRequest() {
+	if cb.halfOpenReqs > 0 {
+		cb.halfOpenReqs--
+	}
 }
 
 // State 获取当前状态
@@ -213,11 +229,12 @@ func (cb *CircuitBreaker) Name() string {
 
 // Stats 熔断器统计信息
 type Stats struct {
-	Name         string       `json:"name"`
-	State        string       `json:"state"`
-	FailureCount int          `json:"failureCount"`
-	SuccessCount int          `json:"successCount"`
-	LastFailure  time.Time    `json:"lastFailure,omitempty"`
+	Name         string        `json:"name"`
+	State        string        `json:"state"`
+	FailureCount int           `json:"failureCount"`
+	SuccessCount int           `json:"successCount"`
+	HalfOpenReqs int           `json:"halfOpenReqs"`
+	LastFailure  time.Time     `json:"lastFailure,omitempty"`
 	Config       CircuitConfig `json:"-"`
 }
 
@@ -231,6 +248,7 @@ func (cb *CircuitBreaker) Stats() Stats {
 		State:        cb.state.String(),
 		FailureCount: cb.failureCount,
 		SuccessCount: cb.successCount,
+		HalfOpenReqs: cb.halfOpenReqs,
 		LastFailure:  cb.lastFailure,
 		Config:       cb.config,
 	}

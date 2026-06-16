@@ -33,10 +33,10 @@ type Metrics struct {
 	GRPCStreamTotal     *prometheus.CounterVec
 
 	// 连接池指标
-	PoolConnections  *prometheus.GaugeVec
-	PoolHealthy      *prometheus.GaugeVec
-	PoolUnhealthy    *prometheus.GaugeVec
-	PoolReconnects   *prometheus.CounterVec
+	PoolConnections *prometheus.GaugeVec
+	PoolHealthy     *prometheus.GaugeVec
+	PoolUnhealthy   *prometheus.GaugeVec
+	PoolReconnects  *prometheus.CounterVec
 
 	// 限流熔断指标
 	RateLimitRejected   *prometheus.CounterVec
@@ -52,12 +52,12 @@ type Metrics struct {
 
 // Config 指标配置
 type Config struct {
-	Namespace   string   // 命名空间
-	Subsystem   string   // 子系统
-	Buckets     []float64 // 直方图桶
-	EnableHTTP  bool     // 启用 HTTP 指标
-	EnableGRPC  bool     // 启用 gRPC 指标
-	EnablePool  bool     // 启用连接池指标
+	Namespace  string    // 命名空间
+	Subsystem  string    // 子系统
+	Buckets    []float64 // 直方图桶
+	EnableHTTP bool      // 启用 HTTP 指标
+	EnableGRPC bool      // 启用 gRPC 指标
+	EnablePool bool      // 启用连接池指标
 }
 
 // DefaultConfig 默认配置
@@ -90,6 +90,7 @@ func Global() *Metrics {
 
 // New 创建新的指标实例
 func New(config Config) *Metrics {
+	config = normalizeConfig(config)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(prometheus.NewGoCollector())
 	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
@@ -116,6 +117,22 @@ func New(config Config) *Metrics {
 	m.initResilienceMetrics(config)
 
 	return m
+}
+
+func normalizeConfig(config Config) Config {
+	defaults := DefaultConfig()
+	if config.Namespace == "" {
+		config.Namespace = defaults.Namespace
+	}
+	if len(config.Buckets) == 0 {
+		config.Buckets = defaults.Buckets
+	}
+	if !config.EnableHTTP && !config.EnableGRPC && !config.EnablePool {
+		config.EnableHTTP = defaults.EnableHTTP
+		config.EnableGRPC = defaults.EnableGRPC
+		config.EnablePool = defaults.EnablePool
+	}
+	return config
 }
 
 func (m *Metrics) initHTTPMetrics(config Config) {

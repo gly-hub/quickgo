@@ -3,6 +3,8 @@ package quickgo
 import (
 	"strings"
 	"testing"
+
+	"github.com/team-dandelion/quickgo/metrics"
 )
 
 func TestNewGrpcServerAppliesDefaultsWithoutMutatingInput(t *testing.T) {
@@ -44,5 +46,38 @@ func TestNewGrpcServerValidatesEtcdConfig(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "endpoints") {
 		t.Fatalf("expected missing endpoints error, got %v", err)
+	}
+}
+
+func TestGrpcServerRegisterAddressPrefersExplicitValue(t *testing.T) {
+	server, err := NewGrpcServer(&GrpcServerConfig{
+		Address:         "0.0.0.0",
+		Port:            50051,
+		RegisterAddress: "10.0.0.12:50051",
+	})
+	if err != nil {
+		t.Fatalf("NewGrpcServer failed: %v", err)
+	}
+
+	if got := server.registerAddress(); got != "10.0.0.12:50051" {
+		t.Fatalf("expected explicit register address, got %q", got)
+	}
+}
+
+func TestGrpcServerClonesMetricsConfig(t *testing.T) {
+	config := &GrpcServerConfig{
+		Metrics: &metrics.Config{Namespace: "grpc", Buckets: []float64{0.1, 0.2}},
+	}
+	server, err := NewGrpcServer(config)
+	if err != nil {
+		t.Fatalf("NewGrpcServer failed: %v", err)
+	}
+
+	if server.config.Metrics == config.Metrics {
+		t.Fatal("expected metrics config to be cloned")
+	}
+	config.Metrics.Buckets[0] = 9
+	if server.config.Metrics.Buckets[0] == 9 {
+		t.Fatal("expected metrics buckets to be cloned")
 	}
 }

@@ -3,6 +3,8 @@ package mongodb
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"time"
 
 	"github.com/team-dandelion/quickgo/logger"
@@ -83,11 +85,6 @@ func NewClient(config *MongoConfig) (*Client, error) {
 		if socketTimeout > 0 {
 			clientOptions.SetSocketTimeout(socketTimeout)
 		}
-	}
-
-	// 添加其他选项
-	for k, v := range config.Options {
-		clientOptions.SetAppName(k + "=" + v)
 	}
 
 	// 创建客户端
@@ -181,43 +178,30 @@ func buildURI(config *MongoConfig) (string, error) {
 		port = 27017
 	}
 
-	uri := fmt.Sprintf("mongodb://")
-
-	// 添加认证信息
-	if config.Username != "" && config.Password != "" {
-		uri += fmt.Sprintf("%s:%s@", config.Username, config.Password)
+	u := url.URL{
+		Scheme: "mongodb",
+		Host:   net.JoinHostPort(config.Host, fmt.Sprintf("%d", port)),
 	}
-
-	// 添加主机和端口
-	uri += fmt.Sprintf("%s:%d", config.Host, port)
-
-	// 添加数据库
+	if config.Username != "" && config.Password != "" {
+		u.User = url.UserPassword(config.Username, config.Password)
+	} else if config.Username != "" {
+		u.User = url.User(config.Username)
+	}
 	if config.Database != "" {
-		uri += "/" + config.Database
+		u.Path = "/" + config.Database
 	}
 
 	// 添加认证源
-	params := make(map[string]string)
+	params := make(url.Values)
 	if config.AuthSource != "" {
-		params["authSource"] = config.AuthSource
+		params.Set("authSource", config.AuthSource)
 	}
 
 	// 添加其他选项
 	for k, v := range config.Options {
-		params[k] = v
+		params.Set(k, v)
 	}
+	u.RawQuery = params.Encode()
 
-	// 构建参数字符串
-	if len(params) > 0 {
-		paramStr := ""
-		for k, v := range params {
-			if paramStr != "" {
-				paramStr += "&"
-			}
-			paramStr += fmt.Sprintf("%s=%s", k, v)
-		}
-		uri += "?" + paramStr
-	}
-
-	return uri, nil
+	return u.String(), nil
 }

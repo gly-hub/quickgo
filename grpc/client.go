@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,12 +19,14 @@ import (
 
 // Client gRPC客户端封装
 type Client struct {
-	conn    *grpc.ClientConn
-	address string
-	options []grpc.DialOption
-	timeout time.Duration
-	ctx     context.Context
-	cancel  context.CancelFunc
+	conn           *grpc.ClientConn
+	address        string
+	options        []grpc.DialOption
+	timeout        time.Duration
+	ctx            context.Context
+	cancel         context.CancelFunc
+	resolverScheme string
+	resolverSD     ServiceDiscovery
 }
 
 // ClientConfig 客户端配置
@@ -91,10 +94,12 @@ func NewClient(config ClientConfig) (*Client, error) {
 		}
 
 		// 注册 resolver
-		if _, err := RegisterResolverAndGet(scheme, config.ServiceDiscovery); err != nil {
+		registeredSD, err := RegisterResolverAndGet(scheme, config.ServiceDiscovery)
+		if err != nil {
 			cancel()
 			return nil, err
 		}
+		config.ServiceDiscovery = registeredSD
 	}
 
 	client := &Client{
@@ -102,6 +107,18 @@ func NewClient(config ClientConfig) (*Client, error) {
 		timeout: config.Timeout,
 		ctx:     ctx,
 		cancel:  cancel,
+	}
+	if config.ServiceDiscovery != nil {
+		client.resolverScheme = extractScheme(address)
+		if client.resolverScheme == "" {
+			switch config.ServiceDiscovery.(type) {
+			case *EtcdResolver:
+				client.resolverScheme = EtcdScheme
+			default:
+				client.resolverScheme = StaticScheme
+			}
+		}
+		client.resolverSD = config.ServiceDiscovery
 	}
 
 	// 构建 DialOption
@@ -127,6 +144,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 		}
 
 		if err != nil {
+			_ = client.Close()
 			cancel()
 			return nil, fmt.Errorf("failed to load TLS credentials: %w", err)
 		}
@@ -229,24 +247,32 @@ func (c *Client) IsConnected() bool {
 
 // Close 关闭连接
 func (c *Client) Close() error {
-	if c.conn == nil {
-		return nil
-	}
-
 	ctx := context.Background()
-	err := c.conn.Close()
-	if err != nil {
-		logger.Error(ctx, "Failed to close gRPC client connection: address=%s, error=%v", c.address, err)
-		return err
+	var errs []error
+	if c.conn != nil {
+		if err := c.conn.Close(); err != nil {
+			logger.Error(ctx, "Failed to close gRPC client connection: address=%s, error=%v", c.address, err)
+			errs = append(errs, err)
+		} else {
+			logger.Info(ctx, "gRPC client connection closed: address=%s", c.address)
+		}
+		c.conn = nil
 	}
-
-	logger.Info(ctx, "gRPC client connection closed: address=%s", c.address)
-	c.conn = nil
 
 	if c.cancel != nil {
 		c.cancel()
 	}
+	if c.resolverScheme != "" && c.resolverSD != nil {
+		if err := ReleaseResolver(c.resolverScheme, c.resolverSD); err != nil {
+			errs = append(errs, err)
+		}
+		c.resolverScheme = ""
+		c.resolverSD = nil
+	}
 
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to close grpc client: %w", errors.Join(errs...))
+	}
 	return nil
 }
 

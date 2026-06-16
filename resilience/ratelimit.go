@@ -67,8 +67,16 @@ func (l *TokenBucketLimiter) Allow() bool {
 }
 
 func (l *TokenBucketLimiter) AllowN(n int) bool {
+	if n <= 0 {
+		return false
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if float64(n) > l.maxTokens {
+		return false
+	}
 
 	l.refill()
 
@@ -84,6 +92,10 @@ func (l *TokenBucketLimiter) Wait(ctx context.Context) error {
 }
 
 func (l *TokenBucketLimiter) WaitN(ctx context.Context, n int) error {
+	if n <= 0 || float64(n) > l.maxTokens {
+		return ErrInvalidTokenCount
+	}
+
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -145,8 +157,16 @@ func (l *SlidingWindowLimiter) Allow() bool {
 }
 
 func (l *SlidingWindowLimiter) AllowN(n int) bool {
+	if n <= 0 {
+		return false
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if n > l.maxReqs {
+		return false
+	}
 
 	l.cleanup()
 
@@ -165,6 +185,10 @@ func (l *SlidingWindowLimiter) Wait(ctx context.Context) error {
 }
 
 func (l *SlidingWindowLimiter) WaitN(ctx context.Context, n int) error {
+	if n <= 0 || n > l.maxReqs {
+		return ErrInvalidTokenCount
+	}
+
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -183,6 +207,9 @@ func (l *SlidingWindowLimiter) WaitN(ctx context.Context, n int) error {
 // ErrRateLimited 限流错误
 var ErrRateLimited = gerr.NewGErr(429, "rate limited")
 
+// ErrInvalidTokenCount 表示请求的令牌数量非法或超过限流器容量。
+var ErrInvalidTokenCount = gerr.NewGErr(400, "invalid token count")
+
 // RateLimitMiddleware 限流中间件配置
 type RateLimitMiddleware struct {
 	limiter  RateLimiter
@@ -199,6 +226,9 @@ func NewRateLimitMiddleware(limiter RateLimiter, blocking bool) *RateLimitMiddle
 
 // Check 检查请求是否被限流
 func (m *RateLimitMiddleware) Check(ctx context.Context) error {
+	if m == nil || m.limiter == nil {
+		return ErrRateLimited
+	}
 	if m.blocking {
 		return m.limiter.Wait(ctx)
 	}

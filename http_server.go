@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/team-dandelion/quickgo/http"
 	"github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/metrics"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -30,6 +31,8 @@ type HTTPServerConfig struct {
 	EnableTrace bool `json:"enableTrace" yaml:"enableTrace"`
 	// CORS 配置
 	CORS CORSConfig `json:"cors" yaml:"cors"`
+	// Metrics 配置（可选）
+	Metrics *metrics.Config `json:"metrics" yaml:"metrics"`
 }
 
 // CORSConfig CORS 配置
@@ -72,6 +75,9 @@ func NewHTTPServer(config *HTTPServerConfig) (*HTTPServer, error) {
 		EnableLogging:  config.EnableLogging,
 		EnableTrace:    config.EnableTrace,
 	}
+	if config.Metrics != nil {
+		httpConfig.Middlewares = append(httpConfig.Middlewares, metrics.FiberMiddleware(metrics.New(*config.Metrics)))
+	}
 
 	// 设置 CORS 配置
 	if config.CORS.AllowOrigins != "" {
@@ -108,6 +114,13 @@ func cloneHTTPServerConfig(config *HTTPServerConfig) *HTTPServerConfig {
 		return nil
 	}
 	cloned := *config
+	if config.Metrics != nil {
+		metricsConfig := *config.Metrics
+		if config.Metrics.Buckets != nil {
+			metricsConfig.Buckets = append([]float64(nil), config.Metrics.Buckets...)
+		}
+		cloned.Metrics = &metricsConfig
+	}
 	return &cloned
 }
 

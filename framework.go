@@ -13,6 +13,7 @@ import (
 	"github.com/team-dandelion/quickgo/db/mongodb"
 	"github.com/team-dandelion/quickgo/db/redis"
 	"github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/metrics"
 	"github.com/team-dandelion/quickgo/tracing"
 )
 
@@ -35,7 +36,9 @@ type Framework struct {
 	redisManager   *redis.Manager
 
 	// 组件注册表（用于扩展）
-	components map[string]Component
+	components                map[string]Component
+	componentOrder            []string
+	initializedComponentOrder []string
 
 	// 生命周期管理
 	mu          sync.RWMutex
@@ -68,6 +71,9 @@ type FrameworkConfig struct {
 
 	// 链路追踪配置（可选）
 	Tracing *tracing.Config
+
+	// 指标配置（可选）
+	Metrics *metrics.Config
 }
 
 // FrameworkOption 框架配置选项
@@ -132,8 +138,9 @@ func NewFramework(opts ...FrameworkOption) (*Framework, error) {
 	}
 
 	f := &Framework{
-		config:     config,
-		components: make(map[string]Component),
+		config:         config,
+		components:     make(map[string]Component),
+		componentOrder: make([]string, 0),
 	}
 
 	return f, nil
@@ -209,6 +216,24 @@ func ConfigOptionWithTracing(config *tracing.Config) FrameworkOption {
 	}
 }
 
+// ConfigOptionWithMetrics 配置指标采集
+func ConfigOptionWithMetrics(config *metrics.Config) FrameworkOption {
+	return func(c *FrameworkConfig) {
+		c.Metrics = cloneMetricsConfig(config)
+	}
+}
+
+func cloneMetricsConfig(config *metrics.Config) *metrics.Config {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	if config.Buckets != nil {
+		cloned.Buckets = append([]float64(nil), config.Buckets...)
+	}
+	return &cloned
+}
+
 // Init 初始化所有组件
 // 只初始化通过 Option 显式配置的组件
 func (f *Framework) Init() error {
@@ -218,8 +243,17 @@ func (f *Framework) Init() error {
 	if f.initialized {
 		return errors.New("framework already initialized")
 	}
+	f.stopped = false
 
 	ctx := context.Background()
+	initialized := false
+	defer func() {
+		if !initialized {
+			if err := f.stopLocked(ctx, false); err != nil {
+				logger.Error(ctx, "Failed to rollback framework after init failure: %v", err)
+			}
+		}
+	}()
 
 	// 1. 初始化链路追踪（最优先，其他组件可能需要追踪）
 	if f.config.Tracing != nil {
@@ -243,6 +277,11 @@ func (f *Framework) Init() error {
 
 	// 3. 初始化 gRPC Server（仅当通过 Option 配置时）
 	if f.config.GrpcServer != nil {
+		if f.config.Metrics != nil && f.config.GrpcServer.Metrics == nil {
+			config := *f.config.GrpcServer
+			config.Metrics = cloneMetricsConfig(f.config.Metrics)
+			f.config.GrpcServer = &config
+		}
 		if err := f.initGrpcServer(ctx); err != nil {
 			return fmt.Errorf("failed to init grpc server: %w", err)
 		}
@@ -257,6 +296,11 @@ func (f *Framework) Init() error {
 
 	// 5. 初始化 HTTP Server（仅当通过 Option 配置时）
 	if f.config.HTTPServer != nil && f.config.HTTPServer.Enabled {
+		if f.config.Metrics != nil && f.config.HTTPServer.Metrics == nil {
+			config := *f.config.HTTPServer
+			config.Metrics = cloneMetricsConfig(f.config.Metrics)
+			f.config.HTTPServer = &config
+		}
 		if err := f.initHTTPServer(ctx); err != nil {
 			return fmt.Errorf("failed to init http server: %w", err)
 		}
@@ -284,15 +328,18 @@ func (f *Framework) Init() error {
 	}
 
 	// 9. 初始化自定义组件
-	for _, component := range f.components {
-		if component.IsEnabled() {
+	for _, name := range f.componentOrder {
+		component := f.components[name]
+		if component != nil && component.IsEnabled() {
 			if err := component.Init(ctx); err != nil {
 				return fmt.Errorf("failed to init component %s: %w", component.Name(), err)
 			}
+			f.initializedComponentOrder = append(f.initializedComponentOrder, name)
 		}
 	}
 
 	f.initialized = true
+	initialized = true
 	logger.Info(ctx, "Framework initialized successfully")
 	return nil
 }
@@ -353,8 +400,9 @@ func (f *Framework) Start() error {
 	}
 
 	// 3. 启动自定义组件
-	for _, component := range f.components {
-		if component.IsEnabled() {
+	for _, name := range f.componentOrder {
+		component := f.components[name]
+		if component != nil && component.IsEnabled() {
 			if err := component.Start(ctx); err != nil {
 				return startFailed("failed to start component %s: %w", component.Name(), err)
 			}
@@ -372,22 +420,26 @@ func (f *Framework) Stop() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if !f.started {
-		return nil // 未启动，无需停止
-	}
-
 	if f.stopped {
 		return nil // 已停止
 	}
+	if !f.initialized && !f.started {
+		return nil
+	}
 
 	ctx := context.Background()
+	return f.stopLocked(ctx, true)
+}
+
+func (f *Framework) stopLocked(ctx context.Context, logStopped bool) error {
 	var errs []error
 
 	// 按相反顺序停止组件
 
 	// 1. 停止自定义组件
-	for _, component := range f.components {
-		if component.IsEnabled() {
+	for i := len(f.initializedComponentOrder) - 1; i >= 0; i-- {
+		component := f.components[f.initializedComponentOrder[i]]
+		if component != nil {
 			if err := component.Stop(ctx); err != nil {
 				logger.Error(ctx, "Failed to stop component %s: %v", component.Name(), err)
 				errs = append(errs, fmt.Errorf("component %s: %w", component.Name(), err))
@@ -401,6 +453,7 @@ func (f *Framework) Stop() error {
 			logger.Error(ctx, "Failed to stop http server: %v", err)
 			errs = append(errs, fmt.Errorf("http server: %w", err))
 		}
+		f.httpServer = nil
 	}
 
 	// 3. 停止 gRPC Server
@@ -409,6 +462,7 @@ func (f *Framework) Stop() error {
 			logger.Error(ctx, "Failed to stop grpc server: %v", err)
 			errs = append(errs, fmt.Errorf("grpc server: %w", err))
 		}
+		f.grpcServer = nil
 	}
 
 	// 4. 关闭 gRPC Client Manager
@@ -417,6 +471,7 @@ func (f *Framework) Stop() error {
 			logger.Error(ctx, "Failed to close grpc client manager: %v", err)
 			errs = append(errs, fmt.Errorf("grpc client manager: %w", err))
 		}
+		f.grpcClientMgr = nil
 	}
 
 	// 5. 关闭数据库连接
@@ -425,6 +480,7 @@ func (f *Framework) Stop() error {
 			logger.Error(ctx, "Failed to close redis manager: %v", err)
 			errs = append(errs, fmt.Errorf("redis manager: %w", err))
 		}
+		f.redisManager = nil
 	}
 
 	if f.mongodbManager != nil {
@@ -432,6 +488,7 @@ func (f *Framework) Stop() error {
 			logger.Error(ctx, "Failed to close mongodb manager: %v", err)
 			errs = append(errs, fmt.Errorf("mongodb manager: %w", err))
 		}
+		f.mongodbManager = nil
 	}
 
 	if f.gormManager != nil {
@@ -439,9 +496,9 @@ func (f *Framework) Stop() error {
 			logger.Error(ctx, "Failed to close gorm manager: %v", err)
 			errs = append(errs, fmt.Errorf("gorm manager: %w", err))
 		}
+		f.gormManager = nil
 	}
 
-	f.stopped = true
 	// 关闭链路追踪
 	if f.config.Tracing != nil && f.config.Tracing.Enabled {
 		if err := tracing.Shutdown(ctx); err != nil {
@@ -452,7 +509,19 @@ func (f *Framework) Stop() error {
 		}
 	}
 
-	logger.Info(ctx, "Framework stopped")
+	f.started = false
+	f.initialized = false
+	f.initializedComponentOrder = nil
+	f.stopped = true
+	if logStopped {
+		logger.Info(ctx, "Framework stopped")
+	}
+	if f.logger != nil {
+		if err := f.logger.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("logger: %w", err))
+		}
+		f.logger = nil
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("framework stopped with errors: %w", errors.Join(errs...))
 	}
@@ -490,6 +559,7 @@ func (f *Framework) RegisterComponent(component Component) error {
 	}
 
 	f.components[name] = component
+	f.componentOrder = append(f.componentOrder, name)
 	logger.Info(context.Background(), "Component registered: %s", name)
 	return nil
 }
