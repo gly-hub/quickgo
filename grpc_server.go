@@ -4,16 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/team-dandelion/quickgo/grpc"
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/tracing"
 	"net"
 	"os"
 	"time"
 
+	"github.com/team-dandelion/quickgo/grpc"
+	"github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/tracing"
+
 	rpc "google.golang.org/grpc"
 
 	"google.golang.org/grpc/keepalive"
+)
+
+const (
+	defaultGrpcServerAddress          = "0.0.0.0"
+	defaultGrpcServerPort             = 50051
+	defaultGrpcServerKeepAliveTime    = 10 * time.Second
+	defaultGrpcServerKeepAliveTimeout = 3 * time.Second
+	defaultEtcdDialTimeout            = 5 * time.Second
 )
 
 type GrpcServerConfig struct {
@@ -58,12 +67,13 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	if config == nil {
 		return nil, errors.New("config is nil")
 	}
+	applyGrpcServerDefaults(config)
 
 	var registrar *grpc.ServiceRegistrar
 
 	// etcd 配置是可选的，如果配置了 etcd 则启用服务注册
 	if config.Etcd != nil {
-		dialTimeout, err := time.ParseDuration(config.Etcd.DialTimeout)
+		dialTimeout, err := parseDurationOrDefault(config.Etcd.DialTimeout, defaultEtcdDialTimeout)
 		if err != nil {
 			logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Etcd.DialTimeout: %v", err)
 			return nil, err
@@ -81,7 +91,7 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 		// 创建 etcd registry
 		registry, err := grpc.NewEtcdRegistry(etcdConfig)
 		if err != nil {
-			logger.Fatal(context.Background(), "Failed to create etcd registry: %v", err)
+			return nil, fmt.Errorf("failed to create etcd registry: %w", err)
 		}
 		// 创建服务注册器
 		metadata := map[string]string{
@@ -95,13 +105,13 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 		logger.Info(context.Background(), "Etcd not configured, running in standalone mode (no service discovery)")
 	}
 
-	keepTime, err := time.ParseDuration(config.KeepAliveTime)
+	keepTime, err := parseDurationOrDefault(config.KeepAliveTime, defaultGrpcServerKeepAliveTime)
 	if err != nil {
 		logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Time: %v", err)
 		return nil, err
 	}
 
-	timeout, err := time.ParseDuration(config.KeepAliveTimeout)
+	timeout, err := parseDurationOrDefault(config.KeepAliveTimeout, defaultGrpcServerKeepAliveTimeout)
 	if err != nil {
 		logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Timeout: %v", err)
 		return nil, err
@@ -123,7 +133,7 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	}
 
 	server, err := grpc.NewServer(grpc.Config{
-		Address: "0.0.0.0",
+		Address: config.Address,
 		Port:    config.Port,
 		Options: []rpc.ServerOption{
 			rpc.ChainUnaryInterceptor(unaryInterceptors...),
@@ -154,6 +164,10 @@ func (s *GrpcServer) RegisterService(register register) error {
 }
 
 func (s *GrpcServer) Start() error {
+	if s == nil || s.server == nil {
+		return errors.New("grpc server is nil")
+	}
+
 	// 获取服务器地址（用于注册到 etcd）
 	// 注意：不能使用 0.0.0.0，因为客户端无法连接到 0.0.0.0
 	// 需要使用实际可访问的 IP 地址
@@ -165,16 +179,9 @@ func (s *GrpcServer) Start() error {
 	serverAddress := fmt.Sprintf("%s:%d", serverIP, s.config.Port)
 	logger.Info(context.Background(), "Server will listen on %s:%d, register address: %s", s.config.Address, s.config.Port, serverAddress)
 
-	// 启动服务器（异步）
-	go func() {
-		logger.Info(context.Background(), "Starting gRPC server on %s:%d", s.config.Address, s.config.Port)
-		if err := s.server.Start(); err != nil {
-			logger.Fatal(context.Background(), "Failed to start server: %v", err)
-		}
-	}()
-
-	// 等待服务器启动
-	time.Sleep(500 * time.Millisecond)
+	if err := s.server.StartAsync(); err != nil {
+		return fmt.Errorf("failed to start grpc server: %w", err)
+	}
 
 	// 如果没有配置 etcd，跳过服务注册
 	if s.config.Etcd == nil {
@@ -189,7 +196,7 @@ func (s *GrpcServer) Start() error {
 		s.registrar.Close()
 	}
 
-	dialTimeout, err := time.ParseDuration(s.config.Etcd.DialTimeout)
+	dialTimeout, err := parseDurationOrDefault(s.config.Etcd.DialTimeout, defaultEtcdDialTimeout)
 	if err != nil {
 		return fmt.Errorf("failed to parse etcd dial timeout: %w", err)
 	}
@@ -218,7 +225,7 @@ func (s *GrpcServer) Start() error {
 	s.registrar = grpc.NewServiceRegistrar(registry, s.config.ServiceName, serverAddress, metadata)
 
 	if err := s.registrar.Register(context.Background()); err != nil {
-		logger.Fatal(context.Background(), "Failed to register service to etcd: %v", err)
+		return fmt.Errorf("failed to register service to etcd: %w", err)
 	}
 	logger.Info(context.Background(), "Service registered to etcd: service=%s, address=%s", s.config.ServiceName, serverAddress)
 
@@ -264,4 +271,20 @@ func (s *GrpcServer) getLocalIP() string {
 
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	return localAddr.IP.String()
+}
+
+func applyGrpcServerDefaults(config *GrpcServerConfig) {
+	if config.Address == "" {
+		config.Address = defaultGrpcServerAddress
+	}
+	if config.Port == 0 {
+		config.Port = defaultGrpcServerPort
+	}
+}
+
+func parseDurationOrDefault(value string, fallback time.Duration) (time.Duration, error) {
+	if value == "" {
+		return fallback, nil
+	}
+	return time.ParseDuration(value)
 }

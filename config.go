@@ -56,8 +56,8 @@ func NewConfigLoader(env string, configPath ...string) (*ConfigLoader, error) {
 	// 获取系统环境变量（优先级更高）
 	if osEnv := os.Getenv(EnvVarName); osEnv != "" {
 		if isValidEnv(osEnv) {
-		env = osEnv
-	}
+			env = osEnv
+		}
 	}
 
 	loader := &ConfigLoader{
@@ -127,7 +127,7 @@ func (l *ConfigLoader) Load(configs ...interface{}) error {
 		decoder, err := mapstructure.NewDecoder(decoderConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create decoder for config[%d]: %w", i, err)
-	}
+		}
 
 		// 将 viper 的所有配置转换为 map
 		configMap := l.viper.AllSettings()
@@ -233,9 +233,9 @@ var (
 // 注意：如果返回错误，会 panic（保持向后兼容）
 func InitConfig(env string, configPath ...string) {
 	loader, err := NewConfigLoader(env, configPath...)
-		if err != nil {
-			panic(err)
-		}
+	if err != nil {
+		panic(err)
+	}
 	globalLoader = loader
 	globalEnv = env
 }
@@ -267,9 +267,9 @@ func LoadCustomConfigKey(key string, cfg interface{}) {
 		panic("config not initialized, call InitConfig first")
 	}
 	if err := globalLoader.LoadKey(key, cfg); err != nil {
-			panic(err)
-		}
+		panic(err)
 	}
+}
 
 // GetEnv 获取全局环境（向后兼容）
 func GetEnv() string {
@@ -290,9 +290,9 @@ func isValidEnv(env string) bool {
 // 从当前工作目录向上查找，直到找到包含 "config" 目录的路径
 func findConfigDir() (string, error) {
 	wd, err := os.Getwd()
-		if err != nil {
+	if err != nil {
 		return "", fmt.Errorf("failed to get working directory: %w", err)
-		}
+	}
 
 	current := wd
 	for {
@@ -310,7 +310,7 @@ func findConfigDir() (string, error) {
 	}
 
 	return "", errors.New("config directory not found, please specify config path explicitly")
-	}
+}
 
 // detectConfigFormat 检测配置文件格式
 func detectConfigFormat(configPath, configName string) (string, error) {

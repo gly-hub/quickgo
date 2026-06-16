@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -15,10 +16,11 @@ import (
 
 // Server HTTP服务器封装
 type Server struct {
-	app     *fiber.App
-	address string
-	port    int
-	config  Config
+	app      *fiber.App
+	address  string
+	port     int
+	config   Config
+	listener net.Listener
 }
 
 // Config HTTP服务器配置
@@ -146,18 +148,40 @@ func (s *Server) GetApp() *fiber.App {
 
 // Start 启动 HTTP 服务器
 func (s *Server) Start() error {
-	addr := fmt.Sprintf("%s:%d", s.address, s.port)
+	if err := s.Listen(); err != nil {
+		return err
+	}
+
 	ctx := context.Background()
-	logger.Info(ctx, "HTTP server starting on %s", addr)
-	return s.app.Listen(addr)
+	logger.Info(ctx, "HTTP server starting on %s", s.GetAddress())
+	return s.app.Listener(s.listener)
+}
+
+// Listen 绑定监听地址，但不启动 HTTP 服务。
+func (s *Server) Listen() error {
+	if s.listener != nil {
+		return nil
+	}
+
+	listener, err := net.Listen("tcp", s.GetAddress())
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s: %w", s.GetAddress(), err)
+	}
+	s.listener = listener
+	return nil
 }
 
 // StartAsync 异步启动 HTTP 服务器
 func (s *Server) StartAsync() error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+
 	go func() {
-		if err := s.Start(); err != nil {
-			ctx := context.Background()
-			logger.Fatal(ctx, "HTTP server failed to start: %v", err)
+		ctx := context.Background()
+		logger.Info(ctx, "HTTP server starting on %s", s.GetAddress())
+		if err := s.app.Listener(s.listener); err != nil {
+			logger.Error(ctx, "HTTP server failed to start: %v", err)
 		}
 	}()
 	return nil
@@ -168,6 +192,11 @@ func (s *Server) Stop() error {
 	ctx := context.Background()
 	logger.Info(ctx, "HTTP server shutting down...")
 	return s.app.Shutdown()
+}
+
+// GetAddress 获取服务器地址
+func (s *Server) GetAddress() string {
+	return fmt.Sprintf("%s:%d", s.address, s.port)
 }
 
 // defaultErrorHandler 默认错误处理器

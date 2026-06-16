@@ -431,7 +431,6 @@ func getCaller() (uintptr, string, int) {
 
 	// Known framework packages to exclude
 	frameworkPackages := []string{
-		"github.com/team-dandelion/quickgo",
 		"google.golang.org/grpc",
 		"github.com/spf13/cobra",
 		"go.opentelemetry.io",
@@ -440,6 +439,10 @@ func getCaller() (uintptr, string, int) {
 
 	for f, again := frames.Next(); again; f, again = frames.Next() {
 		pkg := getPackageName(f.Function)
+
+		if strings.HasSuffix(f.File, "_test.go") {
+			return f.PC, f.File, f.Line
+		}
 
 		// Check if this is the logger package
 		if pkg == loggerPackage {

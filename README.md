@@ -44,4 +44,4 @@ QuickGo is a lightweight, modular Go framework for building microservices with i
 
 - [Logger Documentation](logger/README.md)
 - [Tracing Documentation](tracing/README.md)
-- [Framework Example](example/framework/README.md)
+- [Framework Example](example/framework/QUICKSTART.md)

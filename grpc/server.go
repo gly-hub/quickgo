@@ -79,22 +79,18 @@ func (s *Server) RegisterService(register ServiceRegister) {
 
 // Start 启动gRPC服务器
 func (s *Server) Start() error {
-	addr := fmt.Sprintf("%s:%d", s.address, s.port)
-
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %v", addr, err)
+	if err := s.Listen(); err != nil {
+		return err
 	}
-	s.listener = listener
 
 	// 设置所有服务为健康状态
 	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	ctx := context.Background()
-	logger.Info(ctx, "gRPC server starting on %s", addr)
+	logger.Info(ctx, "gRPC server starting on %s", s.GetAddress())
 
 	// 启动服务器
-	if err := s.server.Serve(listener); err != nil {
+	if err := s.server.Serve(s.listener); err != nil {
 		logger.Error(ctx, "gRPC server failed to serve: %v", err)
 		return fmt.Errorf("failed to serve: %v", err)
 	}
@@ -102,25 +98,36 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// StartAsync 异步启动gRPC服务器
-func (s *Server) StartAsync() error {
-	addr := fmt.Sprintf("%s:%d", s.address, s.port)
+// Listen 绑定监听地址，但不启动 Serve。
+func (s *Server) Listen() error {
+	if s.listener != nil {
+		return nil
+	}
 
+	addr := fmt.Sprintf("%s:%d", s.address, s.port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %v", addr, err)
 	}
 	s.listener = listener
+	return nil
+}
+
+// StartAsync 异步启动gRPC服务器
+func (s *Server) StartAsync() error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
 
 	// 设置所有服务为健康状态
 	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	ctx := context.Background()
-	logger.Info(ctx, "gRPC server starting on %s", addr)
+	logger.Info(ctx, "gRPC server starting on %s", s.GetAddress())
 
 	// 在goroutine中启动服务器
 	go func() {
-		if err := s.server.Serve(listener); err != nil {
+		if err := s.server.Serve(s.listener); err != nil {
 			logger.Error(ctx, "gRPC server error: %v", err)
 		}
 	}()

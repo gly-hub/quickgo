@@ -90,7 +90,10 @@ func NewClient(config ClientConfig) (*Client, error) {
 		}
 
 		// 注册 resolver
-		RegisterResolver(scheme, config.ServiceDiscovery)
+		if _, err := RegisterResolverAndGet(scheme, config.ServiceDiscovery); err != nil {
+			cancel()
+			return nil, err
+		}
 	}
 
 	client := &Client{

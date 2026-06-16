@@ -119,15 +119,7 @@ func (s *HTTPServer) StartAsync() error {
 		return errors.New("server is nil")
 	}
 
-	go func() {
-		ctx := context.Background()
-		logger.Info(ctx, "HTTP server starting on %s:%d", s.config.Address, s.config.Port)
-		if err := s.server.Start(); err != nil {
-			logger.Fatal(ctx, "HTTP server failed to start: %v", err)
-		}
-	}()
-
-	return nil
+	return s.server.StartAsync()
 }
 
 // Stop 停止 HTTP 服务器

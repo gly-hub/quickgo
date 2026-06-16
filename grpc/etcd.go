@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,7 @@ type EtcdConfig struct {
 type EtcdResolver struct {
 	client   *clientv3.Client
 	prefix   string
+	key      string
 	watchers map[string]context.CancelFunc
 	mu       sync.RWMutex
 }
@@ -71,8 +73,14 @@ func NewEtcdResolver(config EtcdConfig) (*EtcdResolver, error) {
 	return &EtcdResolver{
 		client:   client,
 		prefix:   config.Prefix,
+		key:      etcdConfigKey(config),
 		watchers: make(map[string]context.CancelFunc),
 	}, nil
+}
+
+// DiscoveryKey returns a stable key for enforcing one etcd config per resolver scheme.
+func (r *EtcdResolver) DiscoveryKey() string {
+	return r.key
 }
 
 // Resolve 解析服务地址
@@ -135,7 +143,10 @@ func (r *EtcdResolver) Watch(ctx context.Context, serviceName string, callback f
 			select {
 			case <-watchCtx.Done():
 				return
-			case watchResp := <-watchChan:
+			case watchResp, ok := <-watchChan:
+				if !ok {
+					return
+				}
 				if watchResp.Canceled {
 					return
 				}
@@ -339,6 +350,17 @@ func RegisterEtcdResolver(config EtcdConfig) error {
 	if err != nil {
 		return err
 	}
-	RegisterResolver(EtcdScheme, resolver)
-	return nil
+	return RegisterResolver(EtcdScheme, resolver)
+}
+
+func etcdConfigKey(config EtcdConfig) string {
+	endpoints := append([]string(nil), config.Endpoints...)
+	sort.Strings(endpoints)
+	return fmt.Sprintf("endpoints=%s;dial=%s;prefix=%s;username=%s;password=%s",
+		strings.Join(endpoints, ","),
+		config.DialTimeout,
+		config.Prefix,
+		config.Username,
+		config.Password,
+	)
 }

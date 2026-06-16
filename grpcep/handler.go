@@ -25,6 +25,11 @@ import (
 type BaseHandler struct {
 }
 
+var (
+	contextType = reflect.TypeOf((*context.Context)(nil)).Elem()
+	errorType   = reflect.TypeOf((*error)(nil)).Elem()
+)
+
 // isConnectionClosed 检查错误是否表示连接已关闭
 // 用于 SSE 流式响应中检测客户端断开连接
 func isConnectionClosed(err error) bool {
@@ -45,7 +50,7 @@ func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interf
 	c := ctx.Context()
 
 	refParam := reflect.ValueOf(param)
-	if refParam.Kind() != reflect.Ptr {
+	if !refParam.IsValid() || refParam.Kind() != reflect.Ptr {
 		logger.Error(c, "rpc_call param is not a pointer")
 		return errors.New("rpc_call param is not a pointer")
 	}
@@ -62,8 +67,9 @@ func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interf
 	}
 
 	refHandler := reflect.ValueOf(handler)
-	if refHandler.Kind() != reflect.Func {
-		return gerr.NewGErr(FailCode, "WRONG handler")
+	if err := validateGRPCCallHandler(refParam, refHandler); err != nil {
+		logger.Error(c, "rpc_call handler signature error: %v", err)
+		return h.Response(ctx, JsonResponse{}, gerr.NewGErr(FailCode, err.Error()))
 	}
 
 	rpcCxt := h.RPCCtx(ctx)
@@ -82,6 +88,32 @@ func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interf
 	ctx.Response().Header.Add("Content-Type", fiber.MIMEApplicationJSON)
 	_, err := ctx.WriteString(resp)
 	return err
+}
+
+func validateGRPCCallHandler(refParam reflect.Value, refHandler reflect.Value) error {
+	if !refHandler.IsValid() || refHandler.Kind() != reflect.Func {
+		return errors.New("rpc_call handler is not a function")
+	}
+
+	handlerType := refHandler.Type()
+	if handlerType.NumIn() != 2 {
+		return fmt.Errorf("rpc_call handler must accept 2 args, got %d", handlerType.NumIn())
+	}
+	if !handlerType.In(0).Implements(contextType) {
+		return fmt.Errorf("rpc_call handler first arg must implement context.Context, got %s", handlerType.In(0))
+	}
+	if !refParam.Type().AssignableTo(handlerType.In(1)) {
+		return fmt.Errorf("rpc_call handler second arg must accept %s, got %s", refParam.Type(), handlerType.In(1))
+	}
+
+	if handlerType.NumOut() != 2 {
+		return fmt.Errorf("rpc_call handler must return 2 values, got %d", handlerType.NumOut())
+	}
+	if !handlerType.Out(1).Implements(errorType) {
+		return fmt.Errorf("rpc_call handler second return must implement error, got %s", handlerType.Out(1))
+	}
+
+	return nil
 }
 
 func (b *BaseHandler) RPCStream(ctx *fiber.Ctx, param interface{}, streamFunc func(context.Context, interface{}) (interface{}, error)) error {
