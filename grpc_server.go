@@ -271,12 +271,12 @@ func (s *GrpcServer) registerAddress() (string, error) {
 	if ip := os.Getenv("SERVER_IP"); ip != "" {
 		return fmt.Sprintf("%s:%d", ip, s.config.Port), nil
 	}
-	if s.config.Etcd != nil && s.config.Address == "0.0.0.0" {
-		return "", errors.New("grpc server registerAddress or SERVER_IP is required when etcd is configured and listen address is 0.0.0.0")
-	}
 	serverIP := s.getLocalIP()
 	if serverIP == "0.0.0.0" {
 		serverIP = "127.0.0.1"
+	}
+	if s.config.Etcd != nil && serverIP == "127.0.0.1" {
+		logger.Warn(context.Background(), "Grpc server is registering loopback address to etcd; set registerAddress or SERVER_IP when other services need to connect: address=%s, port=%d", s.config.Address, s.config.Port)
 	}
 	return fmt.Sprintf("%s:%d", serverIP, s.config.Port), nil
 }

@@ -75,12 +75,6 @@ func NewServer(config Config) (*Server, error) {
 	if fiberCfg.ErrorHandler == nil {
 		fiberCfg.ErrorHandler = defaultErrorHandler
 	}
-	if fiberCfg.ReadTimeout == 0 {
-		fiberCfg.ReadTimeout = 10 * time.Second
-	}
-	if fiberCfg.WriteTimeout == 0 {
-		fiberCfg.WriteTimeout = 10 * time.Second
-	}
 
 	// 创建 Fiber 应用
 	app := fiber.New(fiberCfg)

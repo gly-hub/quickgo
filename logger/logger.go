@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ var (
 	callerInitOnce    sync.Once
 	maximumCallDepth  = 25
 	knownLoggerFrames = 4
+	formatVerbPattern = regexp.MustCompile(`%(?:\[[0-9]+\])?[-+#0 ]*(?:\*|\[[0-9]+\]\*)?(?:\.(?:\*|\[[0-9]+\]\*))?[bcdefgGopqstTUvVxX%]`)
 )
 
 // Level 日志级别
@@ -293,56 +295,54 @@ func (l *Logger) Warn(ctx context.Context, format string, args ...interface{}) {
 // Error 错误日志，支持 fmt.Sprintf 风格格式化
 // 如果最后一个参数是 error，会被提取为独立的 error 字段；否则所有参数用于格式化消息
 func (l *Logger) Error(ctx context.Context, format string, args ...interface{}) {
-	msg := format
-	var err error
-
-	if len(args) > 0 {
-		// 检查最后一个参数是否是 error
-		if e, ok := args[len(args)-1].(error); ok {
-			err = e
-			// 从 args 中移除 error，用于格式化消息
-			args = args[:len(args)-1]
-		}
-		// 格式化消息
-		if len(args) > 0 {
-			msg = fmt.Sprintf(format, args...)
-		} else if err == nil {
-			// 如果没有格式化参数且没有 error，直接使用 format
-			msg = format
-		} else if err != nil && len(args) == 0 {
-			msg = fmt.Sprintf(format, err)
-			err = nil // 清除 error，因为我们已经在消息中包含了它
-		}
-	}
+	msg, err := formatLogMessage(format, args...)
 	l.log(ctx, LevelError, msg, err, nil)
 }
 
 // Fatal 致命错误日志（会调用 os.Exit(1)），支持 fmt.Sprintf 风格格式化
 // 如果最后一个参数是 error，会被提取为独立的 error 字段；否则所有参数用于格式化消息
 func (l *Logger) Fatal(ctx context.Context, format string, args ...interface{}) {
-	msg := format
-	var err error
-
-	if len(args) > 0 {
-		// 检查最后一个参数是否是 error
-		if e, ok := args[len(args)-1].(error); ok {
-			err = e
-			// 从 args 中移除 error，用于格式化消息
-			args = args[:len(args)-1]
-		}
-		// 格式化消息
-		if len(args) > 0 {
-			msg = fmt.Sprintf(format, args...)
-		} else if err == nil {
-			// 如果没有格式化参数且没有 error，直接使用 format
-			msg = format
-		} else if err != nil && len(args) == 0 {
-			msg = fmt.Sprintf(format, err)
-			err = nil // 清除 error，因为我们已经在消息中包含了它
-		}
-	}
+	msg, err := formatLogMessage(format, args...)
 	l.log(ctx, LevelFatal, msg, err, nil)
 	os.Exit(1)
+}
+
+func formatLogMessage(format string, args ...interface{}) (string, error) {
+	var err error
+	if len(args) == 0 {
+		return format, nil
+	}
+
+	if e, ok := args[len(args)-1].(error); ok {
+		err = e
+		formatArgs := args
+		if countFormatVerbs(format) < len(args) {
+			formatArgs = args[:len(args)-1]
+		}
+		if len(formatArgs) == 0 {
+			return format, err
+		}
+		return sprintf(format, formatArgs...), err
+	}
+
+	return sprintf(format, args...), nil
+}
+
+func sprintf(format string, args ...interface{}) string {
+	sprintfFunc := fmt.Sprintf
+	return sprintfFunc(format, args...)
+}
+
+func countFormatVerbs(format string) int {
+	matches := formatVerbPattern.FindAllString(format, -1)
+	count := 0
+	for _, match := range matches {
+		if strings.HasSuffix(match, "%") {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 // SetLevel 设置日志级别
