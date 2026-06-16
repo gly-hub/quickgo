@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -19,6 +20,7 @@ import (
 
 // Client gRPC客户端封装
 type Client struct {
+	mu             sync.RWMutex
 	conn           *grpc.ClientConn
 	address        string
 	options        []grpc.DialOption
@@ -203,7 +205,10 @@ func NewClient(config ClientConfig) (*Client, error) {
 
 // Connect 连接到gRPC服务器
 func (c *Client) Connect(ctx context.Context) error {
-	if c.conn != nil {
+	c.mu.RLock()
+	connected := c.conn != nil
+	c.mu.RUnlock()
+	if connected {
 		return fmt.Errorf("client already connected")
 	}
 
@@ -220,7 +225,14 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to %s: %w", c.address, err)
 	}
 
+	c.mu.Lock()
+	if c.conn != nil {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("client already connected")
+	}
 	c.conn = conn
+	c.mu.Unlock()
 	logger.Info(ctx, "gRPC client connected: address=%s", c.address)
 
 	return nil
@@ -233,15 +245,20 @@ func (c *Client) ConnectWithContext(ctx context.Context) error {
 
 // GetConn 获取底层连接
 func (c *Client) GetConn() *grpc.ClientConn {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.conn
 }
 
 // IsConnected 检查是否已连接
 func (c *Client) IsConnected() bool {
-	if c.conn == nil {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
 		return false
 	}
-	state := c.conn.GetState()
+	state := conn.GetState()
 	return state == connectivity.Ready
 }
 
@@ -249,25 +266,35 @@ func (c *Client) IsConnected() bool {
 func (c *Client) Close() error {
 	ctx := context.Background()
 	var errs []error
-	if c.conn != nil {
-		if err := c.conn.Close(); err != nil {
+	c.mu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	if conn != nil {
+		if err := conn.Close(); err != nil {
 			logger.Error(ctx, "Failed to close gRPC client connection: address=%s, error=%v", c.address, err)
 			errs = append(errs, err)
 		} else {
 			logger.Info(ctx, "gRPC client connection closed: address=%s", c.address)
 		}
-		c.conn = nil
 	}
 
-	if c.cancel != nil {
-		c.cancel()
+	c.mu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	resolverScheme := c.resolverScheme
+	resolverSD := c.resolverSD
+	c.resolverScheme = ""
+	c.resolverSD = nil
+	c.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
-	if c.resolverScheme != "" && c.resolverSD != nil {
-		if err := ReleaseResolver(c.resolverScheme, c.resolverSD); err != nil {
+	if resolverScheme != "" && resolverSD != nil {
+		if err := ReleaseResolver(resolverScheme, resolverSD); err != nil {
 			errs = append(errs, err)
 		}
-		c.resolverScheme = ""
-		c.resolverSD = nil
 	}
 
 	if len(errs) > 0 {
@@ -278,11 +305,14 @@ func (c *Client) Close() error {
 
 // HealthCheck 健康检查
 func (c *Client) HealthCheck(ctx context.Context, service string) (*grpc_health_v1.HealthCheckResponse, error) {
-	if c.conn == nil {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
 		return nil, fmt.Errorf("client not connected")
 	}
 
-	healthClient := grpc_health_v1.NewHealthClient(c.conn)
+	healthClient := grpc_health_v1.NewHealthClient(conn)
 
 	req := &grpc_health_v1.HealthCheckRequest{
 		Service: service,

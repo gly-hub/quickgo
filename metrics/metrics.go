@@ -52,23 +52,29 @@ type Metrics struct {
 
 // Config 指标配置
 type Config struct {
-	Namespace  string    // 命名空间
-	Subsystem  string    // 子系统
-	Buckets    []float64 // 直方图桶
-	EnableHTTP bool      // 启用 HTTP 指标
-	EnableGRPC bool      // 启用 gRPC 指标
-	EnablePool bool      // 启用连接池指标
+	Namespace         string    // 命名空间
+	Subsystem         string    // 子系统
+	Buckets           []float64 // 直方图桶
+	EnableHTTP        bool      // 启用 HTTP 指标
+	EnableGRPC        bool      // 启用 gRPC 指标
+	EnablePool        bool      // 启用连接池指标
+	EnableResilience  bool      // 启用限流熔断指标
+	DisableHTTP       bool      // 显式禁用 HTTP 指标
+	DisableGRPC       bool      // 显式禁用 gRPC 指标
+	DisablePool       bool      // 显式禁用连接池指标
+	DisableResilience bool      // 显式禁用限流熔断指标
 }
 
 // DefaultConfig 默认配置
 func DefaultConfig() Config {
 	return Config{
-		Namespace:  "quickgo",
-		Subsystem:  "",
-		Buckets:    prometheus.DefBuckets,
-		EnableHTTP: true,
-		EnableGRPC: true,
-		EnablePool: true,
+		Namespace:        "quickgo",
+		Subsystem:        "",
+		Buckets:          prometheus.DefBuckets,
+		EnableHTTP:       true,
+		EnableGRPC:       true,
+		EnablePool:       true,
+		EnableResilience: true,
 	}
 }
 
@@ -124,7 +130,9 @@ func New(config Config) *Metrics {
 		m.initPoolMetrics(config)
 	}
 
-	m.initResilienceMetrics(config)
+	if config.EnableResilience {
+		m.initResilienceMetrics(config)
+	}
 
 	return m
 }
@@ -137,10 +145,28 @@ func normalizeConfig(config Config) Config {
 	if len(config.Buckets) == 0 {
 		config.Buckets = defaults.Buckets
 	}
-	if !config.EnableHTTP && !config.EnableGRPC && !config.EnablePool {
+	hasExplicitEnable := config.EnableHTTP || config.EnableGRPC || config.EnablePool || config.EnableResilience
+	if !hasExplicitEnable {
 		config.EnableHTTP = defaults.EnableHTTP
 		config.EnableGRPC = defaults.EnableGRPC
 		config.EnablePool = defaults.EnablePool
+		config.EnableResilience = defaults.EnableResilience
+	} else if !config.DisableResilience {
+		// Resilience metrics existed before the per-collector toggles and remain on
+		// by default unless explicitly disabled.
+		config.EnableResilience = true
+	}
+	if config.DisableHTTP {
+		config.EnableHTTP = false
+	}
+	if config.DisableGRPC {
+		config.EnableGRPC = false
+	}
+	if config.DisablePool {
+		config.EnablePool = false
+	}
+	if config.DisableResilience {
+		config.EnableResilience = false
 	}
 	return config
 }

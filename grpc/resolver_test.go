@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"sync"
 	"testing"
 )
 
@@ -101,4 +102,31 @@ func TestRegisterResolverReferenceCountingClosesOnLastRelease(t *testing.T) {
 		t.Fatal("expected released scheme to bind to new resolver")
 	}
 	defer ReleaseResolver(scheme, third)
+}
+
+func TestClientConcurrentCloseAndReads(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		Address:  "127.0.0.1:1",
+		Insecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = client.GetConn()
+			_ = client.IsConnected()
+			_, _ = client.HealthCheck(context.Background(), "")
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = client.Close()
+	}()
+	wg.Wait()
 }

@@ -49,6 +49,8 @@ type GrpcServerConfig struct {
 	Etcd *EtcdConfig `json:"etcd" yaml:"etcd" toml:"etcd"`
 	// Metrics 配置（可选）
 	Metrics *metrics.Config `json:"metrics" yaml:"metrics" toml:"metrics"`
+
+	metrics *metrics.Metrics
 }
 
 type EtcdConfig struct {
@@ -64,6 +66,7 @@ type GrpcServer struct {
 	server    *grpc.Server
 	config    *GrpcServerConfig
 	registrar *grpc.ServiceRegistrar
+	metrics   *metrics.Metrics
 }
 
 type register func(s *rpc.Server)
@@ -108,10 +111,13 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	streamInterceptors := []rpc.StreamServerInterceptor{
 		grpc.StreamLoggingInterceptor(),
 	}
-	if config.Metrics != nil {
-		m := metrics.New(*config.Metrics)
-		unaryInterceptors = append(unaryInterceptors, metrics.UnaryServerInterceptor(m))
-		streamInterceptors = append(streamInterceptors, metrics.StreamServerInterceptor(m))
+	metricCollector := config.metrics
+	if metricCollector == nil && config.Metrics != nil {
+		metricCollector = metrics.New(*config.Metrics)
+	}
+	if metricCollector != nil {
+		unaryInterceptors = append(unaryInterceptors, metrics.UnaryServerInterceptor(metricCollector))
+		streamInterceptors = append(streamInterceptors, metrics.StreamServerInterceptor(metricCollector))
 	}
 
 	// 如果启用了 OpenTelemetry tracing，添加 tracing 拦截器
@@ -140,8 +146,9 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	}
 
 	return &GrpcServer{
-		server: server,
-		config: config,
+		server:  server,
+		config:  config,
+		metrics: metricCollector,
 	}, nil
 }
 
@@ -155,7 +162,10 @@ func (s *GrpcServer) Start() error {
 		return errors.New("grpc server is nil")
 	}
 
-	serverAddress := s.registerAddress()
+	serverAddress, err := s.registerAddress()
+	if err != nil {
+		return err
+	}
 	logger.Info(context.Background(), "Server will listen on %s:%d, register address: %s", s.config.Address, s.config.Port, serverAddress)
 
 	if err := s.server.StartAsync(); err != nil {
@@ -246,24 +256,33 @@ func (s *GrpcServer) Stop() error {
 	return nil
 }
 
-func (s *GrpcServer) registerAddress() string {
+// Metrics 获取 gRPC 服务器使用的指标收集器。
+func (s *GrpcServer) Metrics() *metrics.Metrics {
+	if s == nil {
+		return nil
+	}
+	return s.metrics
+}
+
+func (s *GrpcServer) registerAddress() (string, error) {
 	if s.config.RegisterAddress != "" {
-		return s.config.RegisterAddress
+		return s.config.RegisterAddress, nil
+	}
+	if ip := os.Getenv("SERVER_IP"); ip != "" {
+		return fmt.Sprintf("%s:%d", ip, s.config.Port), nil
+	}
+	if s.config.Etcd != nil && s.config.Address == "0.0.0.0" {
+		return "", errors.New("grpc server registerAddress or SERVER_IP is required when etcd is configured and listen address is 0.0.0.0")
 	}
 	serverIP := s.getLocalIP()
 	if serverIP == "0.0.0.0" {
 		serverIP = "127.0.0.1"
 	}
-	return fmt.Sprintf("%s:%d", serverIP, s.config.Port)
+	return fmt.Sprintf("%s:%d", serverIP, s.config.Port), nil
 }
 
 // getLocalIP 获取本地 IP 地址
 func (s *GrpcServer) getLocalIP() string {
-	// 尝试从环境变量获取
-	if ip := os.Getenv("SERVER_IP"); ip != "" {
-		return ip
-	}
-
 	// 尝试连接外部地址以获取本地 IP
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {

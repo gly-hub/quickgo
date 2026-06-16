@@ -104,13 +104,22 @@ func NewServer(config Config) (*Server, error) {
 }
 
 func (c *Config) applyMiddlewareDefaults() {
-	if c.EnableCORS || c.EnableRecovery || c.EnableLogging || c.EnableTrace {
-		return
+	c.EnableCORS = c.EnableCORS || !c.DisableCORS
+	c.EnableRecovery = c.EnableRecovery || !c.DisableRecovery
+	c.EnableLogging = c.EnableLogging || !c.DisableLogging
+	c.EnableTrace = c.EnableTrace || !c.DisableTrace
+	if c.DisableCORS {
+		c.EnableCORS = false
 	}
-	c.EnableCORS = !c.DisableCORS
-	c.EnableRecovery = !c.DisableRecovery
-	c.EnableLogging = !c.DisableLogging
-	c.EnableTrace = !c.DisableTrace
+	if c.DisableRecovery {
+		c.EnableRecovery = false
+	}
+	if c.DisableLogging {
+		c.EnableLogging = false
+	}
+	if c.DisableTrace {
+		c.EnableTrace = false
+	}
 }
 
 // registerDefaultMiddlewares 注册默认中间件

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
 	"github.com/team-dandelion/quickgo/http"
 	"github.com/team-dandelion/quickgo/logger"
 	"github.com/team-dandelion/quickgo/metrics"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
 )
 
 type AppRouteHandler func(app *fiber.App)
@@ -29,10 +31,24 @@ type HTTPServerConfig struct {
 	EnableLogging bool `json:"enableLogging" yaml:"enableLogging"`
 	// 是否启用链路追踪中间件
 	EnableTrace bool `json:"enableTrace" yaml:"enableTrace"`
+	// 显式禁用 CORS
+	DisableCORS bool `json:"disableCORS" yaml:"disableCORS"`
+	// 显式禁用恢复中间件
+	DisableRecovery bool `json:"disableRecovery" yaml:"disableRecovery"`
+	// 显式禁用日志中间件
+	DisableLogging bool `json:"disableLogging" yaml:"disableLogging"`
+	// 显式禁用链路追踪中间件
+	DisableTrace bool `json:"disableTrace" yaml:"disableTrace"`
 	// CORS 配置
 	CORS CORSConfig `json:"cors" yaml:"cors"`
 	// Metrics 配置（可选）
 	Metrics *metrics.Config `json:"metrics" yaml:"metrics"`
+	// MetricsPath 指标暴露路径，默认 /metrics
+	MetricsPath string `json:"metricsPath" yaml:"metricsPath"`
+	// DisableMetricsEndpoint 显式禁用 /metrics 路由
+	DisableMetricsEndpoint bool `json:"disableMetricsEndpoint" yaml:"disableMetricsEndpoint"`
+
+	metrics *metrics.Metrics
 }
 
 // CORSConfig CORS 配置
@@ -47,8 +63,9 @@ type CORSConfig struct {
 
 // HTTPServer HTTP 服务器封装
 type HTTPServer struct {
-	server *http.Server
-	config *HTTPServerConfig
+	server  *http.Server
+	config  *HTTPServerConfig
+	metrics *metrics.Metrics
 }
 
 // NewHTTPServer 创建 HTTP 服务器实例
@@ -68,15 +85,23 @@ func NewHTTPServer(config *HTTPServerConfig) (*HTTPServer, error) {
 
 	// 构建 HTTP 服务器配置
 	httpConfig := http.Config{
-		Address:        config.Address,
-		Port:           config.Port,
-		EnableCORS:     config.EnableCORS,
-		EnableRecovery: config.EnableRecovery,
-		EnableLogging:  config.EnableLogging,
-		EnableTrace:    config.EnableTrace,
+		Address:         config.Address,
+		Port:            config.Port,
+		EnableCORS:      config.EnableCORS,
+		EnableRecovery:  config.EnableRecovery,
+		EnableLogging:   config.EnableLogging,
+		EnableTrace:     config.EnableTrace,
+		DisableCORS:     config.DisableCORS,
+		DisableRecovery: config.DisableRecovery,
+		DisableLogging:  config.DisableLogging,
+		DisableTrace:    config.DisableTrace,
 	}
-	if config.Metrics != nil {
-		httpConfig.Middlewares = append(httpConfig.Middlewares, metrics.FiberMiddleware(metrics.New(*config.Metrics)))
+	metricCollector := config.metrics
+	if metricCollector == nil && config.Metrics != nil {
+		metricCollector = metrics.New(*config.Metrics)
+	}
+	if metricCollector != nil {
+		httpConfig.Middlewares = append(httpConfig.Middlewares, metrics.FiberMiddleware(metricCollector))
 	}
 
 	// 设置 CORS 配置
@@ -103,9 +128,18 @@ func NewHTTPServer(config *HTTPServerConfig) (*HTTPServer, error) {
 		return nil, fmt.Errorf("failed to create http server: %w", err)
 	}
 
+	if metricCollector != nil && !config.DisableMetricsEndpoint {
+		metricsPath := config.MetricsPath
+		if metricsPath == "" {
+			metricsPath = "/metrics"
+		}
+		server.GetApp().Get(metricsPath, adaptor.HTTPHandler(metricCollector.Handler()))
+	}
+
 	return &HTTPServer{
-		server: server,
-		config: config,
+		server:  server,
+		config:  config,
+		metrics: metricCollector,
 	}, nil
 }
 
@@ -163,6 +197,11 @@ func (s *HTTPServer) GetApp() *fiber.App {
 // GetServer 获取底层 HTTP 服务器实例
 func (s *HTTPServer) GetServer() *http.Server {
 	return s.server
+}
+
+// Metrics 获取 HTTP 服务器使用的指标收集器。
+func (s *HTTPServer) Metrics() *metrics.Metrics {
+	return s.metrics
 }
 
 func (s *HTTPServer) RegisterApp(handler AppRouteHandler) error {

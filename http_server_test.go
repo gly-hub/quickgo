@@ -1,8 +1,12 @@
 package quickgo
 
 import (
+	"io"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/team-dandelion/quickgo/metrics"
 )
 
@@ -46,5 +50,30 @@ func TestNewHTTPServerClonesMetricsConfig(t *testing.T) {
 	config.Metrics.Buckets[0] = 9
 	if server.config.Metrics.Buckets[0] == 9 {
 		t.Fatal("expected metrics buckets to be cloned")
+	}
+}
+
+func TestNewHTTPServerExposesMetricsEndpoint(t *testing.T) {
+	server, err := NewHTTPServer(&HTTPServerConfig{
+		Metrics: &metrics.Config{Namespace: "httpserver"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPServer failed: %v", err)
+	}
+
+	server.Metrics().RecordHTTPRequest("GET", "/ok", "200", 0)
+	resp, err := server.GetApp().Test(httptest.NewRequest("GET", "/metrics", nil))
+	if err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected metrics status 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics body failed: %v", err)
+	}
+	if !strings.Contains(string(body), "httpserver_http_requests_total") {
+		t.Fatalf("expected metrics endpoint to expose shared collector, got %s", string(body))
 	}
 }

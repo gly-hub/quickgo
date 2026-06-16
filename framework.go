@@ -23,7 +23,8 @@ type Framework struct {
 	config *FrameworkConfig
 
 	// 核心组件
-	logger *logger.Logger
+	logger  *logger.Logger
+	metrics *metrics.Metrics
 
 	// 服务组件
 	grpcServer    *GrpcServer
@@ -41,10 +42,13 @@ type Framework struct {
 	initializedComponentOrder []string
 
 	// 生命周期管理
-	mu          sync.RWMutex
-	initialized bool
-	started     bool
-	stopped     bool
+	mu           sync.RWMutex
+	lifecycleMu  sync.Mutex
+	initializing bool
+	stopping     bool
+	initialized  bool
+	started      bool
+	stopped      bool
 }
 
 // FrameworkConfig 框架配置（内部使用）
@@ -237,21 +241,28 @@ func cloneMetricsConfig(config *metrics.Config) *metrics.Config {
 // Init 初始化所有组件
 // 只初始化通过 Option 显式配置的组件
 func (f *Framework) Init() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.lifecycleMu.Lock()
+	defer f.lifecycleMu.Unlock()
 
+	f.mu.Lock()
 	if f.initialized {
+		f.mu.Unlock()
 		return errors.New("framework already initialized")
 	}
 	f.stopped = false
+	f.initializing = true
+	f.mu.Unlock()
 
 	ctx := context.Background()
 	initialized := false
 	defer func() {
 		if !initialized {
-			if err := f.stopLocked(ctx, false); err != nil {
+			if err := f.stop(ctx, false); err != nil {
 				logger.Error(ctx, "Failed to rollback framework after init failure: %v", err)
 			}
+			f.mu.Lock()
+			f.initializing = false
+			f.mu.Unlock()
 		}
 	}()
 
@@ -272,14 +283,24 @@ func (f *Framework) Init() error {
 		logger.Init(logger.Config{
 			Level: logger.LevelInfo,
 		})
-		f.logger = logger.GetDefault()
+		f.setLogger(logger.GetDefault())
 	}
 
-	// 3. 初始化 gRPC Server（仅当通过 Option 配置时）
+	// 3. 初始化指标收集器（如果配置）
+	if f.config.Metrics != nil {
+		f.setMetrics(metrics.New(*f.config.Metrics))
+	}
+
+	// 4. 初始化 gRPC Server（仅当通过 Option 配置时）
 	if f.config.GrpcServer != nil {
 		if f.config.Metrics != nil && f.config.GrpcServer.Metrics == nil {
 			config := *f.config.GrpcServer
 			config.Metrics = cloneMetricsConfig(f.config.Metrics)
+			f.config.GrpcServer = &config
+		}
+		if f.metrics != nil {
+			config := *f.config.GrpcServer
+			config.metrics = f.metrics
 			f.config.GrpcServer = &config
 		}
 		if err := f.initGrpcServer(ctx); err != nil {
@@ -287,18 +308,23 @@ func (f *Framework) Init() error {
 		}
 	}
 
-	// 4. 初始化 gRPC Client Manager（仅当通过 Option 配置时）
+	// 5. 初始化 gRPC Client Manager（仅当通过 Option 配置时）
 	if f.config.GrpcClient != nil {
 		if err := f.initGrpcClientManager(ctx); err != nil {
 			return fmt.Errorf("failed to init grpc client manager: %w", err)
 		}
 	}
 
-	// 5. 初始化 HTTP Server（仅当通过 Option 配置时）
+	// 6. 初始化 HTTP Server（仅当通过 Option 配置时）
 	if f.config.HTTPServer != nil && f.config.HTTPServer.Enabled {
 		if f.config.Metrics != nil && f.config.HTTPServer.Metrics == nil {
 			config := *f.config.HTTPServer
 			config.Metrics = cloneMetricsConfig(f.config.Metrics)
+			f.config.HTTPServer = &config
+		}
+		if f.metrics != nil {
+			config := *f.config.HTTPServer
+			config.metrics = f.metrics
 			f.config.HTTPServer = &config
 		}
 		if err := f.initHTTPServer(ctx); err != nil {
@@ -306,39 +332,44 @@ func (f *Framework) Init() error {
 		}
 	}
 
-	// 6. 初始化 GORM 数据库管理器（仅当通过 Option 配置时）
+	// 7. 初始化 GORM 数据库管理器（仅当通过 Option 配置时）
 	if f.config.Gorm != nil {
 		if err := f.initGormManager(ctx); err != nil {
 			return fmt.Errorf("failed to init gorm manager: %w", err)
 		}
 	}
 
-	// 7. 初始化 MongoDB 数据库管理器（仅当通过 Option 配置时）
+	// 8. 初始化 MongoDB 数据库管理器（仅当通过 Option 配置时）
 	if f.config.MongoDB != nil {
 		if err := f.initMongoDBManager(ctx); err != nil {
 			return fmt.Errorf("failed to init mongodb manager: %w", err)
 		}
 	}
 
-	// 8. 初始化 Redis 数据库管理器（仅当通过 Option 配置时）
+	// 9. 初始化 Redis 数据库管理器（仅当通过 Option 配置时）
 	if f.config.Redis != nil {
 		if err := f.initRedisManager(ctx); err != nil {
 			return fmt.Errorf("failed to init redis manager: %w", err)
 		}
 	}
 
-	// 9. 初始化自定义组件
-	for _, name := range f.componentOrder {
-		component := f.components[name]
+	// 10. 初始化自定义组件
+	for _, entry := range f.componentsSnapshot() {
+		component := entry.component
 		if component != nil && component.IsEnabled() {
 			if err := component.Init(ctx); err != nil {
 				return fmt.Errorf("failed to init component %s: %w", component.Name(), err)
 			}
-			f.initializedComponentOrder = append(f.initializedComponentOrder, name)
+			f.mu.Lock()
+			f.initializedComponentOrder = append(f.initializedComponentOrder, entry.name)
+			f.mu.Unlock()
 		}
 	}
 
+	f.mu.Lock()
 	f.initialized = true
+	f.initializing = false
+	f.mu.Unlock()
 	initialized = true
 	logger.Info(ctx, "Framework initialized successfully")
 	return nil
@@ -346,20 +377,28 @@ func (f *Framework) Init() error {
 
 // Start 启动所有组件
 func (f *Framework) Start() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.lifecycleMu.Lock()
+	defer f.lifecycleMu.Unlock()
 
+	f.mu.Lock()
 	if !f.initialized {
+		f.mu.Unlock()
 		return errors.New("framework not initialized, call Init() first")
 	}
 
 	if f.started {
+		f.mu.Unlock()
 		return errors.New("framework already started")
 	}
+	grpcServer := f.grpcServer
+	httpServer := f.httpServer
+	grpcClientMgr := f.grpcClientMgr
+	components := f.initializedComponentsLocked()
+	f.mu.Unlock()
 
 	ctx := context.Background()
 	var cleanup []func()
-	startedComponents := make([]Component, 0, len(f.components))
+	startedComponents := make([]Component, 0, len(components))
 	startFailed := func(format string, args ...interface{}) error {
 		for i := len(startedComponents) - 1; i >= 0; i-- {
 			component := startedComponents[i]
@@ -374,12 +413,12 @@ func (f *Framework) Start() error {
 	}
 
 	// 1. 启动 gRPC Server
-	if f.grpcServer != nil {
-		if err := f.grpcServer.Start(); err != nil {
+	if grpcServer != nil {
+		if err := grpcServer.Start(); err != nil {
 			return fmt.Errorf("failed to start grpc server: %w", err)
 		}
 		cleanup = append(cleanup, func() {
-			if err := f.grpcServer.Stop(); err != nil {
+			if err := grpcServer.Stop(); err != nil {
 				logger.Error(ctx, "Failed to rollback grpc server after start failure: %v", err)
 			}
 		})
@@ -387,12 +426,12 @@ func (f *Framework) Start() error {
 	}
 
 	// 2. 启动 HTTP Server
-	if f.httpServer != nil {
-		if err := f.httpServer.StartAsync(); err != nil {
+	if httpServer != nil {
+		if err := httpServer.StartAsync(); err != nil {
 			return startFailed("failed to start http server: %w", err)
 		}
 		cleanup = append(cleanup, func() {
-			if err := f.httpServer.Stop(); err != nil {
+			if err := httpServer.Stop(); err != nil {
 				logger.Error(ctx, "Failed to rollback http server after start failure: %v", err)
 			}
 		})
@@ -400,8 +439,7 @@ func (f *Framework) Start() error {
 	}
 
 	// 3. 启动自定义组件
-	for _, name := range f.componentOrder {
-		component := f.components[name]
+	for _, component := range components {
 		if component != nil && component.IsEnabled() {
 			if err := component.Start(ctx); err != nil {
 				return startFailed("failed to start component %s: %w", component.Name(), err)
@@ -410,35 +448,84 @@ func (f *Framework) Start() error {
 		}
 	}
 
+	f.mu.Lock()
+	if f.started {
+		f.mu.Unlock()
+		return startFailed("framework already started")
+	}
 	f.started = true
+	f.mu.Unlock()
+	if grpcClientMgr != nil {
+		grpcClientMgr.StartHealthCheck()
+	}
 	logger.Info(ctx, "Framework started successfully")
 	return nil
 }
 
 // Stop 停止所有组件
 func (f *Framework) Stop() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.lifecycleMu.Lock()
+	defer f.lifecycleMu.Unlock()
 
+	f.mu.Lock()
 	if f.stopped {
+		f.mu.Unlock()
 		return nil // 已停止
 	}
-	if !f.initialized && !f.started {
+	if !f.initializing && !f.initialized && !f.started {
+		f.mu.Unlock()
 		return nil
 	}
+	f.mu.Unlock()
 
 	ctx := context.Background()
-	return f.stopLocked(ctx, true)
+	return f.stop(ctx, true)
 }
 
-func (f *Framework) stopLocked(ctx context.Context, logStopped bool) error {
+func (f *Framework) stop(ctx context.Context, logStopped bool) error {
+	f.mu.Lock()
+	if f.stopped || (!f.initializing && !f.initialized && !f.started) {
+		f.mu.Unlock()
+		return nil
+	}
+	components := f.initializedComponentsLocked()
+	httpServer := f.httpServer
+	grpcServer := f.grpcServer
+	grpcClientMgr := f.grpcClientMgr
+	redisManager := f.redisManager
+	mongodbManager := f.mongodbManager
+	gormManager := f.gormManager
+	frameworkLogger := f.logger
+	traceEnabled := f.config.Tracing != nil && f.config.Tracing.Enabled
+
+	f.httpServer = nil
+	f.grpcServer = nil
+	f.grpcClientMgr = nil
+	f.redisManager = nil
+	f.mongodbManager = nil
+	f.gormManager = nil
+	f.logger = nil
+	f.metrics = nil
+	f.started = false
+	f.initializing = false
+	f.initialized = false
+	f.initializedComponentOrder = nil
+	f.stopping = true
+	f.stopped = true
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.stopping = false
+		f.mu.Unlock()
+	}()
+
 	var errs []error
 
 	// 按相反顺序停止组件
 
 	// 1. 停止自定义组件
-	for i := len(f.initializedComponentOrder) - 1; i >= 0; i-- {
-		component := f.components[f.initializedComponentOrder[i]]
+	for i := len(components) - 1; i >= 0; i-- {
+		component := components[i]
 		if component != nil {
 			if err := component.Stop(ctx); err != nil {
 				logger.Error(ctx, "Failed to stop component %s: %v", component.Name(), err)
@@ -448,59 +535,53 @@ func (f *Framework) stopLocked(ctx context.Context, logStopped bool) error {
 	}
 
 	// 2. 停止 HTTP Server
-	if f.httpServer != nil {
-		if err := f.httpServer.Stop(); err != nil {
+	if httpServer != nil {
+		if err := httpServer.Stop(); err != nil {
 			logger.Error(ctx, "Failed to stop http server: %v", err)
 			errs = append(errs, fmt.Errorf("http server: %w", err))
 		}
-		f.httpServer = nil
 	}
 
 	// 3. 停止 gRPC Server
-	if f.grpcServer != nil {
-		if err := f.grpcServer.Stop(); err != nil {
+	if grpcServer != nil {
+		if err := grpcServer.Stop(); err != nil {
 			logger.Error(ctx, "Failed to stop grpc server: %v", err)
 			errs = append(errs, fmt.Errorf("grpc server: %w", err))
 		}
-		f.grpcServer = nil
 	}
 
 	// 4. 关闭 gRPC Client Manager
-	if f.grpcClientMgr != nil {
-		if err := f.grpcClientMgr.CloseAll(); err != nil {
+	if grpcClientMgr != nil {
+		if err := grpcClientMgr.CloseAll(); err != nil {
 			logger.Error(ctx, "Failed to close grpc client manager: %v", err)
 			errs = append(errs, fmt.Errorf("grpc client manager: %w", err))
 		}
-		f.grpcClientMgr = nil
 	}
 
 	// 5. 关闭数据库连接
-	if f.redisManager != nil {
-		if err := f.redisManager.Close(); err != nil {
+	if redisManager != nil {
+		if err := redisManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close redis manager: %v", err)
 			errs = append(errs, fmt.Errorf("redis manager: %w", err))
 		}
-		f.redisManager = nil
 	}
 
-	if f.mongodbManager != nil {
-		if err := f.mongodbManager.Close(); err != nil {
+	if mongodbManager != nil {
+		if err := mongodbManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close mongodb manager: %v", err)
 			errs = append(errs, fmt.Errorf("mongodb manager: %w", err))
 		}
-		f.mongodbManager = nil
 	}
 
-	if f.gormManager != nil {
-		if err := f.gormManager.Close(); err != nil {
+	if gormManager != nil {
+		if err := gormManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close gorm manager: %v", err)
 			errs = append(errs, fmt.Errorf("gorm manager: %w", err))
 		}
-		f.gormManager = nil
 	}
 
 	// 关闭链路追踪
-	if f.config.Tracing != nil && f.config.Tracing.Enabled {
+	if traceEnabled {
 		if err := tracing.Shutdown(ctx); err != nil {
 			logger.Error(ctx, "Failed to shutdown tracing: %v", err)
 			errs = append(errs, fmt.Errorf("tracing: %w", err))
@@ -509,18 +590,13 @@ func (f *Framework) stopLocked(ctx context.Context, logStopped bool) error {
 		}
 	}
 
-	f.started = false
-	f.initialized = false
-	f.initializedComponentOrder = nil
-	f.stopped = true
 	if logStopped {
 		logger.Info(ctx, "Framework stopped")
 	}
-	if f.logger != nil {
-		if err := f.logger.Close(); err != nil {
+	if frameworkLogger != nil {
+		if err := frameworkLogger.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("logger: %w", err))
 		}
-		f.logger = nil
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("framework stopped with errors: %w", errors.Join(errs...))
@@ -557,11 +633,96 @@ func (f *Framework) RegisterComponent(component Component) error {
 	if _, exists := f.components[name]; exists {
 		return fmt.Errorf("component %s already registered", name)
 	}
+	if f.initializing || f.initialized || f.started || f.stopping {
+		return errors.New("cannot register component after framework initialization has started")
+	}
 
 	f.components[name] = component
 	f.componentOrder = append(f.componentOrder, name)
 	logger.Info(context.Background(), "Component registered: %s", name)
 	return nil
+}
+
+type componentEntry struct {
+	name      string
+	component Component
+}
+
+func (f *Framework) componentsSnapshot() []componentEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	components := make([]componentEntry, 0, len(f.componentOrder))
+	for _, name := range f.componentOrder {
+		if component := f.components[name]; component != nil {
+			components = append(components, componentEntry{name: name, component: component})
+		}
+	}
+	return components
+}
+
+func (f *Framework) initializedComponents() []Component {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.initializedComponentsLocked()
+}
+
+func (f *Framework) initializedComponentsLocked() []Component {
+	components := make([]Component, 0, len(f.initializedComponentOrder))
+	for _, name := range f.initializedComponentOrder {
+		if component := f.components[name]; component != nil {
+			components = append(components, component)
+		}
+	}
+	return components
+}
+
+func (f *Framework) setLogger(value *logger.Logger) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logger = value
+}
+
+func (f *Framework) setMetrics(value *metrics.Metrics) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.metrics = value
+}
+
+func (f *Framework) setGrpcServer(value *GrpcServer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grpcServer = value
+}
+
+func (f *Framework) setGrpcClientManager(value *GrpcClientManager) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grpcClientMgr = value
+}
+
+func (f *Framework) setHTTPServer(value *HTTPServer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.httpServer = value
+}
+
+func (f *Framework) setGormManager(value *gorm.Manager) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gormManager = value
+}
+
+func (f *Framework) setMongoDBManager(value *mongodb.Manager) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mongodbManager = value
+}
+
+func (f *Framework) setRedisManager(value *redis.Manager) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.redisManager = value
 }
 
 // GetComponent 获取自定义组件
@@ -581,37 +742,58 @@ func (f *Framework) GetComponent(name string) (Component, error) {
 
 // Logger 获取 Logger 实例
 func (f *Framework) Logger() *logger.Logger {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.logger
 }
 
 // GrpcServer 获取 gRPC 服务器实例
 func (f *Framework) GrpcServer() *GrpcServer {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.grpcServer
 }
 
 // GrpcClientManager 获取 gRPC 客户端管理器实例
 func (f *Framework) GrpcClientManager() *GrpcClientManager {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.grpcClientMgr
 }
 
 // HTTPServer 获取 HTTP 服务器实例
 func (f *Framework) HTTPServer() *HTTPServer {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.httpServer
 }
 
 // GormManager 获取 GORM 数据库管理器实例
 func (f *Framework) GormManager() *gorm.Manager {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.gormManager
 }
 
 // MongoManager 获取 MongoDB 数据库管理器实例
 func (f *Framework) MongoManager() *mongodb.Manager {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.mongodbManager
 }
 
 // RedisManager 获取 Redis 数据库管理器实例
 func (f *Framework) RedisManager() *redis.Manager {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.redisManager
+}
+
+// Metrics 获取框架共享的指标收集器。
+func (f *Framework) Metrics() *metrics.Metrics {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.metrics
 }
 
 // ==================== 内部初始化方法 ====================
@@ -651,7 +833,7 @@ func (f *Framework) initLogger(ctx context.Context) error {
 		return err
 	}
 
-	f.logger = logger.GetDefault()
+	f.setLogger(logger.GetDefault())
 	return nil
 }
 
@@ -662,7 +844,7 @@ func (f *Framework) initGrpcServer(ctx context.Context) error {
 		return err
 	}
 
-	f.grpcServer = server
+	f.setGrpcServer(server)
 	return nil
 }
 
@@ -673,7 +855,7 @@ func (f *Framework) initGrpcClientManager(ctx context.Context) error {
 		return err
 	}
 
-	f.grpcClientMgr = manager
+	f.setGrpcClientManager(manager)
 	return nil
 }
 
@@ -684,7 +866,7 @@ func (f *Framework) initHTTPServer(ctx context.Context) error {
 		return err
 	}
 
-	f.httpServer = server
+	f.setHTTPServer(server)
 	return nil
 }
 
@@ -694,7 +876,7 @@ func (f *Framework) initGormManager(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	f.gormManager = manager
+	f.setGormManager(manager)
 	logger.Info(ctx, "GORM manager initialized")
 	return nil
 }
@@ -705,7 +887,7 @@ func (f *Framework) initMongoDBManager(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	f.mongodbManager = manager
+	f.setMongoDBManager(manager)
 	logger.Info(ctx, "MongoDB manager initialized")
 	return nil
 }
@@ -716,7 +898,7 @@ func (f *Framework) initRedisManager(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	f.redisManager = manager
+	f.setRedisManager(manager)
 	logger.Info(ctx, "Redis manager initialized")
 	return nil
 }

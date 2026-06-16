@@ -44,6 +44,19 @@ func TestNewZeroConfigEnablesDefaultCollectors(t *testing.T) {
 	}
 }
 
+func TestConfigCanDisableCollectorsExplicitly(t *testing.T) {
+	m := New(Config{
+		DisableHTTP:       true,
+		DisableGRPC:       true,
+		DisablePool:       true,
+		DisableResilience: true,
+	})
+
+	if m.HTTPRequestTotal != nil || m.GRPCRequestTotal != nil || m.PoolConnections != nil || m.RateLimitRejected != nil {
+		t.Fatal("expected all explicitly disabled collectors to be nil")
+	}
+}
+
 func TestFiberMiddlewareRecordsHTTPRequest(t *testing.T) {
 	m := New(Config{Namespace: "test"})
 	app := fiber.New()
