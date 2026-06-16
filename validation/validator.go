@@ -13,10 +13,10 @@ import (
 
 // ValidationError 验证错误
 type ValidationError struct {
-	Field   string // 字段名
-	Tag     string // 验证标签
+	Field   string      // 字段名
+	Tag     string      // 验证标签
 	Value   interface{} // 字段值
-	Message string // 错误信息
+	Message string      // 错误信息
 }
 
 func (e *ValidationError) Error() string {

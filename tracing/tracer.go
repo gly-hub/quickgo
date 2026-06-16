@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,6 +25,7 @@ var (
 	globalTracer trace.Tracer
 	// tp 全局 TracerProvider
 	tp *tracesdk.TracerProvider
+	mu sync.RWMutex
 )
 
 // Init 初始化链路追踪
@@ -71,7 +73,7 @@ func Init(config *Config) error {
 		// 使用 OTLP Exporter（推荐）
 		// 解析 endpoint，提取 host:port
 		endpoint := parseOTLPEndpoint(config.OTLP.Endpoint)
-		
+
 		if config.OTLP.UseGRPC {
 			// 使用 gRPC
 			opts := []otlptracegrpc.Option{
@@ -152,15 +154,16 @@ func Init(config *Config) error {
 	}
 
 	// 创建 TracerProvider
+	var newProvider *tracesdk.TracerProvider
 	if exporter == nil {
 		// 如果没有 exporter，使用 Noop TracerProvider（仅本地追踪，不上传）
-		tp = tracesdk.NewTracerProvider(
+		newProvider = tracesdk.NewTracerProvider(
 			tracesdk.WithResource(res),
 			tracesdk.WithSampler(tracesdk.TraceIDRatioBased(samplingRate)),
 		)
 	} else {
 		// 创建 TracerProvider（带 exporter，会上传到 Jaeger）
-		tp = tracesdk.NewTracerProvider(
+		newProvider = tracesdk.NewTracerProvider(
 			tracesdk.WithBatcher(exporter),
 			tracesdk.WithResource(res),
 			tracesdk.WithSampler(tracesdk.TraceIDRatioBased(samplingRate)),
@@ -168,7 +171,7 @@ func Init(config *Config) error {
 	}
 
 	// 设置全局 TracerProvider
-	otel.SetTracerProvider(tp)
+	otel.SetTracerProvider(newProvider)
 
 	// 设置全局 TextMapPropagator（用于跨服务传播 trace context）
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -177,26 +180,41 @@ func Init(config *Config) error {
 	))
 
 	// 创建全局 Tracer
+	mu.Lock()
+	oldProvider := tp
+	tp = newProvider
 	globalTracer = otel.Tracer(serviceName)
+	mu.Unlock()
+	if oldProvider != nil && oldProvider != newProvider {
+		_ = oldProvider.Shutdown(context.Background())
+	}
 
 	return nil
 }
 
 // Shutdown 关闭链路追踪
 func Shutdown(ctx context.Context) error {
-	if tp != nil {
-		return tp.Shutdown(ctx)
+	mu.Lock()
+	current := tp
+	tp = nil
+	globalTracer = nil
+	mu.Unlock()
+	if current != nil {
+		return current.Shutdown(ctx)
 	}
 	return nil
 }
 
 // GetTracer 获取 Tracer 实例
 func GetTracer() trace.Tracer {
-	if globalTracer == nil {
+	mu.RLock()
+	current := globalTracer
+	mu.RUnlock()
+	if current == nil {
 		// 如果未初始化，返回 Noop Tracer
 		return trace.NewNoopTracerProvider().Tracer("noop")
 	}
-	return globalTracer
+	return current
 }
 
 // StartSpan 开始一个新的 span
@@ -231,6 +249,8 @@ func AddTraceIDToSpan(span trace.Span, ctx context.Context) {
 
 // IsEnabled 检查 tracing 是否已启用
 func IsEnabled() bool {
+	mu.RLock()
+	defer mu.RUnlock()
 	return globalTracer != nil && tp != nil
 }
 

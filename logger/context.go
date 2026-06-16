@@ -81,7 +81,7 @@ func StartSpan(ctx context.Context) context.Context {
 		traceID = GenerateTraceID()
 		ctx = WithTraceID(ctx, traceID)
 	}
-	
+
 	// 生成新的 span ID
 	spanID := GenerateSpanID()
 	return WithSpanID(ctx, spanID)
@@ -93,8 +93,7 @@ func WithParentSpan(ctx context.Context) context.Context {
 	if traceID == "" {
 		traceID = GenerateTraceID()
 	}
-	
+
 	spanID := GenerateSpanID()
 	return WithTrace(ctx, traceID, spanID)
 }
-

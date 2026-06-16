@@ -97,12 +97,11 @@ func (m *Manager) RegisterClient(config *RedisConfig) error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 检查是否已存在
 	if _, exists := m.clients[config.Name]; exists {
+		m.mu.Unlock()
 		return fmt.Errorf("redis client already exists: name=%s", config.Name)
 	}
+	m.mu.Unlock()
 
 	ctx := context.Background()
 	logger.Info(ctx, "Registering new Redis client: name=%s", config.Name)
@@ -112,6 +111,12 @@ func (m *Manager) RegisterClient(config *RedisConfig) error {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.clients[config.Name]; exists {
+		_ = client.Close()
+		return fmt.Errorf("redis client already exists: name=%s", config.Name)
+	}
 	m.clients[config.Name] = client
 	logger.Info(ctx, "Redis client registered successfully: name=%s", config.Name)
 

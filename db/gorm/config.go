@@ -67,12 +67,12 @@ type GormConfig struct {
 	// 从库配置列表（可选，用于读写分离）
 	Slaves []SlaveConfig `json:"slaves" yaml:"slaves" toml:"slaves"`
 	// 连接池配置
-	MaxIdleConn     int    `json:"maxIdleConn" yaml:"maxIdleConn" toml:"maxIdleConn"`         // 最大空闲连接数
-	MaxOpenConn     int    `json:"maxOpenConn" yaml:"maxOpenConn" toml:"maxOpenConn"`         // 最大打开连接数
+	MaxIdleConn     int    `json:"maxIdleConn" yaml:"maxIdleConn" toml:"maxIdleConn"`             // 最大空闲连接数
+	MaxOpenConn     int    `json:"maxOpenConn" yaml:"maxOpenConn" toml:"maxOpenConn"`             // 最大打开连接数
 	ConnMaxLifetime string `json:"connMaxLifetime" yaml:"connMaxLifetime" toml:"connMaxLifetime"` // 连接最大生存时间（如：30m、1h）
 	ConnMaxIdleTime string `json:"connMaxIdleTime" yaml:"connMaxIdleTime" toml:"connMaxIdleTime"` // 连接最大空闲时间（如：10m、30m）
 	// GORM 配置
-	LogLevel      string `json:"logLevel" yaml:"logLevel" toml:"logLevel"`           // 日志级别：silent, error, warn, info
+	LogLevel      string `json:"logLevel" yaml:"logLevel" toml:"logLevel"`                // 日志级别：silent, error, warn, info
 	SlowThreshold int    `json:"slowThreshold" yaml:"slowThreshold" toml:"slowThreshold"` // 慢查询阈值（毫秒）
 	// 是否启用日志
 	EnableLog bool `json:"enableLog" yaml:"enableLog" toml:"enableLog"`
@@ -83,4 +83,3 @@ type GormManagerConfig struct {
 	// 数据库配置列表
 	Databases []GormConfig `json:"databases" yaml:"databases" toml:"databases"`
 }
-

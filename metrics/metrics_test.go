@@ -116,3 +116,15 @@ func TestMetricsHandlerExposesDefaultNamespace(t *testing.T) {
 		t.Fatalf("expected default namespace metric in handler output")
 	}
 }
+
+func TestInitCanReplaceGlobalMetrics(t *testing.T) {
+	first := Init(Config{Namespace: "first"})
+	second := Init(Config{Namespace: "second"})
+
+	if first == second {
+		t.Fatal("expected Init to replace global metrics instance")
+	}
+	if got := Global(); got != second {
+		t.Fatal("expected Global to return latest Init instance")
+	}
+}

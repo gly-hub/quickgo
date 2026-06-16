@@ -17,12 +17,12 @@ type RedisConfig struct {
 	// 用户名（Redis 6.0+）
 	Username string `json:"username" yaml:"username" toml:"username"`
 	// 连接池配置
-	PoolSize     int    `json:"poolSize" yaml:"poolSize" toml:"poolSize"`           // 连接池大小
+	PoolSize     int    `json:"poolSize" yaml:"poolSize" toml:"poolSize"`             // 连接池大小
 	MinIdleConns int    `json:"minIdleConns" yaml:"minIdleConns" toml:"minIdleConns"` // 最小空闲连接数
 	MaxConnAge   string `json:"maxConnAge" yaml:"maxConnAge" toml:"maxConnAge"`       // 连接最大生存时间（如：1h、30m）
 	PoolTimeout  string `json:"poolTimeout" yaml:"poolTimeout" toml:"poolTimeout"`    // 获取连接超时时间（如：4s、5s）
-	IdleTimeout  string `json:"idleTimeout" yaml:"idleTimeout" toml:"idleTimeout"`   // 空闲连接超时时间（如：5m、10m）
-	DialTimeout  string `json:"dialTimeout" yaml:"dialTimeout" toml:"dialTimeout"`   // 连接超时时间（如：5s、10s）
+	IdleTimeout  string `json:"idleTimeout" yaml:"idleTimeout" toml:"idleTimeout"`    // 空闲连接超时时间（如：5m、10m）
+	DialTimeout  string `json:"dialTimeout" yaml:"dialTimeout" toml:"dialTimeout"`    // 连接超时时间（如：5s、10s）
 	ReadTimeout  string `json:"readTimeout" yaml:"readTimeout" toml:"readTimeout"`    // 读取超时时间（如：3s、5s）
 	WriteTimeout string `json:"writeTimeout" yaml:"writeTimeout" toml:"writeTimeout"` // 写入超时时间（如：3s、5s）
 	// 是否启用 TLS
@@ -34,4 +34,3 @@ type RedisManagerConfig struct {
 	// 数据库配置列表
 	Databases []RedisConfig `json:"databases" yaml:"databases" toml:"databases"`
 }
-

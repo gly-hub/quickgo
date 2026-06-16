@@ -177,6 +177,7 @@ func (m *GrpcClientManager) RegisterService(serviceName string) error {
 func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (*grpc.Client, error) {
 	m.mu.RLock()
 	pool, exists := m.clientPools[serviceName]
+	_, registered := m.services[serviceName]
 	m.mu.RUnlock()
 
 	if exists && pool != nil {
@@ -185,35 +186,35 @@ func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (
 			return client, nil
 		}
 	}
-
-	// 需要创建新连接池
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 双重检查
-	if pool, exists := m.clientPools[serviceName]; exists && pool != nil {
-		client := pool.getClient()
-		if client != nil && client.IsConnected() {
-			return client, nil
-		}
-	}
-
-	// 检查服务是否已注册
-	if _, exists := m.services[serviceName]; !exists {
+	if !registered {
 		return nil, fmt.Errorf("service not registered: %s", serviceName)
 	}
 
-	// 创建连接池
-	pool, err := m.createClientPool(ctx, serviceName)
+	// 创建连接池可能触发网络 I/O，避免持有 manager 写锁。
+	newPool, err := m.createClientPool(ctx, serviceName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client pool for service %s: %w", serviceName, err)
 	}
 
-	// 保存连接池
-	m.clientPools[serviceName] = pool
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if pool, exists := m.clientPools[serviceName]; exists && pool != nil {
+		client := pool.getClient()
+		if client != nil && client.IsConnected() {
+			_ = newPool.close()
+			return client, nil
+		}
+		_ = pool.close()
+	}
+	if _, exists := m.services[serviceName]; !exists {
+		_ = newPool.close()
+		return nil, fmt.Errorf("service not registered: %s", serviceName)
+	}
+
+	m.clientPools[serviceName] = newPool
 	logger.Info(ctx, "Created gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
 
-	client := pool.getClient()
+	client := newPool.getClient()
 	if client == nil {
 		return nil, fmt.Errorf("no usable grpc client available for service %s", serviceName)
 	}
@@ -271,11 +272,16 @@ func (m *GrpcClientManager) createClient(serviceName string) (*grpc.Client, erro
 	// 确定连接地址
 	// 如果是静态模式，从 StaticAddresses 中获取地址
 	address := serviceName
-	if config.Discovery == "static" && config.StaticAddresses != nil {
-		if staticAddr, ok := config.StaticAddresses[serviceName]; ok {
-			address = staticAddr
-			logger.Info(context.Background(), "Using static address for service: service=%s, address=%s", serviceName, address)
+	if config.Discovery == "static" {
+		if config.StaticAddresses == nil {
+			return nil, fmt.Errorf("static address map is required for service %s", serviceName)
 		}
+		staticAddr, ok := config.StaticAddresses[serviceName]
+		if !ok || staticAddr == "" {
+			return nil, fmt.Errorf("static address is required for service %s", serviceName)
+		}
+		address = staticAddr
+		logger.Info(context.Background(), "Using static address for service: service=%s, address=%s", serviceName, address)
 	}
 
 	// 构建客户端配置
@@ -415,12 +421,20 @@ func (p *clientPool) finishReconnectLocked(idx int) {
 
 // ConnectAll 连接所有已注册的客户端
 func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	services := make([]string, 0, len(m.services))
+	existingPools := make(map[string]struct{}, len(m.clientPools))
+	for serviceName := range m.services {
+		services = append(services, serviceName)
+	}
+	for serviceName := range m.clientPools {
+		existingPools[serviceName] = struct{}{}
+	}
+	m.mu.RUnlock()
 
 	var errs []error
-	for serviceName := range m.services {
-		if _, exists := m.clientPools[serviceName]; exists {
+	for _, serviceName := range services {
+		if _, exists := existingPools[serviceName]; exists {
 			continue // 已经连接
 		}
 
@@ -430,7 +444,20 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		m.mu.Lock()
+		if _, exists := m.clientPools[serviceName]; exists {
+			m.mu.Unlock()
+			_ = pool.close()
+			continue
+		}
+		if _, registered := m.services[serviceName]; !registered {
+			m.mu.Unlock()
+			_ = pool.close()
+			errs = append(errs, fmt.Errorf("service %s: service not registered", serviceName))
+			continue
+		}
 		m.clientPools[serviceName] = pool
+		m.mu.Unlock()
 		logger.Info(ctx, "Connected gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
 	}
 
@@ -801,8 +828,21 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 	}
 
 	// 构建客户端配置
+	address := serviceName
+	if config.Discovery == "static" {
+		if config.StaticAddresses == nil {
+			return nil, fmt.Errorf("static address map is required for service %s", serviceName)
+		}
+		staticAddr, ok := config.StaticAddresses[serviceName]
+		if !ok || staticAddr == "" {
+			return nil, fmt.Errorf("static address is required for service %s", serviceName)
+		}
+		address = staticAddr
+		logger.Info(context.Background(), "Using static address for service: service=%s, address=%s", serviceName, address)
+	}
+
 	clientConfig := grpc.ClientConfig{
-		Address:  serviceName, // 使用传入的服务名称
+		Address:  address,
 		Timeout:  timeout,
 		Insecure: config.Insecure,
 	}

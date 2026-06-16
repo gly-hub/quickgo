@@ -15,7 +15,7 @@ import (
 var (
 	// 全局指标实例
 	globalMetrics *Metrics
-	once          sync.Once
+	globalMu      sync.RWMutex
 )
 
 // Metrics 指标收集器
@@ -74,16 +74,26 @@ func DefaultConfig() Config {
 
 // Init 初始化全局指标
 func Init(config Config) *Metrics {
-	once.Do(func() {
-		globalMetrics = New(config)
-	})
-	return globalMetrics
+	m := New(config)
+	globalMu.Lock()
+	globalMetrics = m
+	globalMu.Unlock()
+	return m
 }
 
 // Global 获取全局指标实例
 func Global() *Metrics {
+	globalMu.RLock()
+	current := globalMetrics
+	globalMu.RUnlock()
+	if current != nil {
+		return current
+	}
+
+	globalMu.Lock()
+	defer globalMu.Unlock()
 	if globalMetrics == nil {
-		Init(DefaultConfig())
+		globalMetrics = New(DefaultConfig())
 	}
 	return globalMetrics
 }

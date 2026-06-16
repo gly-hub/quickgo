@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
@@ -225,6 +226,7 @@ func (l *ConfigLoader) GetConfigFormat() string {
 var (
 	globalLoader *ConfigLoader
 	globalEnv    string
+	globalMu     sync.RWMutex
 )
 
 // InitConfig 初始化全局配置加载器（向后兼容）
@@ -232,12 +234,22 @@ var (
 // configPath: 配置文件目录路径（可选）
 // 注意：如果返回错误，会 panic（保持向后兼容）
 func InitConfig(env string, configPath ...string) {
-	loader, err := NewConfigLoader(env, configPath...)
-	if err != nil {
+	if err := InitConfigE(env, configPath...); err != nil {
 		panic(err)
 	}
+}
+
+// InitConfigE 初始化全局配置加载器，返回错误而不是 panic。
+func InitConfigE(env string, configPath ...string) error {
+	loader, err := NewConfigLoader(env, configPath...)
+	if err != nil {
+		return err
+	}
+	globalMu.Lock()
 	globalLoader = loader
 	globalEnv = env
+	globalMu.Unlock()
+	return nil
 }
 
 // LoadCustomConfig 使用全局配置加载器加载配置（向后兼容）
@@ -251,32 +263,52 @@ func InitConfig(env string, configPath ...string) {
 // 4. 如果没有对应格式的标签，会尝试使用结构体字段名（小写）匹配
 // 5. 推荐方式：使用 LoadCustomConfigKey 显式指定键名
 func LoadCustomConfig(configs ...interface{}) {
-	if globalLoader == nil {
-		panic("config not initialized, call InitConfig first")
-	}
-	if err := globalLoader.Load(configs...); err != nil {
+	if err := LoadCustomConfigE(configs...); err != nil {
 		panic(err)
 	}
+}
+
+// LoadCustomConfigE 使用全局配置加载器加载配置，返回错误而不是 panic。
+func LoadCustomConfigE(configs ...interface{}) error {
+	globalMu.RLock()
+	loader := globalLoader
+	globalMu.RUnlock()
+	if loader == nil {
+		return errors.New("config not initialized, call InitConfig first")
+	}
+	return loader.Load(configs...)
 }
 
 // LoadCustomConfigKey 使用全局配置加载器加载指定键的配置（推荐）
 // key: 配置文件的键名（例如："app", "logger", "grpcServer"）
 // cfg: 配置结构体指针
 func LoadCustomConfigKey(key string, cfg interface{}) {
-	if globalLoader == nil {
-		panic("config not initialized, call InitConfig first")
-	}
-	if err := globalLoader.LoadKey(key, cfg); err != nil {
+	if err := LoadCustomConfigKeyE(key, cfg); err != nil {
 		panic(err)
 	}
 }
 
+// LoadCustomConfigKeyE 使用全局配置加载器加载指定键，返回错误而不是 panic。
+func LoadCustomConfigKeyE(key string, cfg interface{}) error {
+	globalMu.RLock()
+	loader := globalLoader
+	globalMu.RUnlock()
+	if loader == nil {
+		return errors.New("config not initialized, call InitConfig first")
+	}
+	return loader.LoadKey(key, cfg)
+}
+
 // GetEnv 获取全局环境（向后兼容）
 func GetEnv() string {
-	if globalLoader != nil {
-		return globalLoader.GetEnv()
+	globalMu.RLock()
+	loader := globalLoader
+	env := globalEnv
+	globalMu.RUnlock()
+	if loader != nil {
+		return loader.GetEnv()
 	}
-	return globalEnv
+	return env
 }
 
 // ==================== 内部辅助函数 ====================
