@@ -294,6 +294,26 @@ func TestSetLevel(t *testing.T) {
 	}
 }
 
+func TestGlobalCloseResetsDefaultLogger(t *testing.T) {
+	if err := Init(Config{Level: LevelDebug}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	first := GetDefault()
+	if first == nil {
+		t.Fatal("expected default logger")
+	}
+	if err := Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	second := GetDefault()
+	if second == nil {
+		t.Fatal("expected default logger to be recreated")
+	}
+	if second == first {
+		t.Fatal("expected Close to reset default logger")
+	}
+}
+
 // TestCallerInfo 测试调用者信息
 func TestCallerInfo(t *testing.T) {
 	tmpFile, _ := os.CreateTemp("", "logger_test_*.log")

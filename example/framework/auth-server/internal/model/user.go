@@ -10,14 +10,14 @@ import (
 // UserModel 用户模型（数据库表结构）
 type UserModel struct {
 	ID        uint           `gorm:"primarykey" json:"id"`
-	UserID    string         `gorm:"uniqueIndex;not null;size:64" json:"user_id"` // 用户ID
+	UserID    string         `gorm:"uniqueIndex;not null;size:64" json:"user_id"`  // 用户ID
 	Username  string         `gorm:"uniqueIndex;not null;size:64" json:"username"` // 用户名
 	Password  string         `gorm:"not null;size:255" json:"-"`                   // 密码（不返回）
-	Email     string         `gorm:"size:128" json:"email"`                         // 邮箱
-	Nickname  string         `gorm:"size:64" json:"nickname"`                       // 昵称
-	Avatar    string         `gorm:"size:255" json:"avatar"`                        // 头像
-	Roles     string         `gorm:"size:255" json:"roles"`                         // 角色（逗号分隔）
-	Status    int            `gorm:"default:1" json:"status"`                       // 状态：1-正常，0-禁用
+	Email     string         `gorm:"size:128" json:"email"`                        // 邮箱
+	Nickname  string         `gorm:"size:64" json:"nickname"`                      // 昵称
+	Avatar    string         `gorm:"size:255" json:"avatar"`                       // 头像
+	Roles     string         `gorm:"size:255" json:"roles"`                        // 角色（逗号分隔）
+	Status    int            `gorm:"default:1" json:"status"`                      // 状态：1-正常，0-禁用
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
@@ -54,4 +54,3 @@ func (u *UserModel) SetRoles(roles []string) {
 	// 使用逗号连接角色
 	u.Roles = strings.Join(roles, ",")
 }
-

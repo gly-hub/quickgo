@@ -98,12 +98,11 @@ func (m *Manager) RegisterClient(config *GormConfig) error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 检查是否已存在
 	if _, exists := m.clients[config.Name]; exists {
+		m.mu.Unlock()
 		return fmt.Errorf("gorm client already exists: name=%s", config.Name)
 	}
+	m.mu.Unlock()
 
 	ctx := context.Background()
 	logger.Info(ctx, "Registering new GORM client: name=%s", config.Name)
@@ -113,6 +112,12 @@ func (m *Manager) RegisterClient(config *GormConfig) error {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.clients[config.Name]; exists {
+		_ = client.Close()
+		return fmt.Errorf("gorm client already exists: name=%s", config.Name)
+	}
 	m.clients[config.Name] = client
 	logger.Info(ctx, "GORM client registered successfully: name=%s", config.Name)
 

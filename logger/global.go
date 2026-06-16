@@ -3,36 +3,51 @@ package logger
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 var (
 	// defaultLogger 默认的全局日志记录器
 	defaultLogger *Logger
+	defaultMu     sync.RWMutex
 )
 
 // Init 初始化全局日志记录器
 func Init(config Config) error {
-	logger, err := NewLogger(config)
+	newLogger, err := NewLogger(config)
 	if err != nil {
 		return err
 	}
-	defaultLogger = logger
+
+	defaultMu.Lock()
+	defaultLogger = newLogger
+	defaultMu.Unlock()
 	return nil
 }
 
 // SetDefault 设置默认日志记录器
 func SetDefault(logger *Logger) {
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
 	defaultLogger = logger
 }
 
 // GetDefault 获取默认日志记录器
 func GetDefault() *Logger {
+	defaultMu.RLock()
+	current := defaultLogger
+	defaultMu.RUnlock()
+	if current != nil {
+		return current
+	}
+
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
 	if defaultLogger == nil {
-		// 如果没有初始化，创建一个默认的，使用动态调用者检测
 		defaultLogger, _ = NewLogger(Config{
 			Level:      LevelInfo,
 			Service:    "default",
-			CallerSkip: 0, // 0 表示使用动态检测
+			CallerSkip: 0,
 		})
 	}
 	return defaultLogger
@@ -85,8 +100,12 @@ func SetLevel(level Level) {
 
 // Close 关闭默认日志记录器
 func Close() error {
-	if defaultLogger != nil {
-		return defaultLogger.Close()
+	defaultMu.Lock()
+	current := defaultLogger
+	defaultLogger = nil
+	defaultMu.Unlock()
+	if current != nil {
+		return current.Close()
 	}
 	return nil
 }

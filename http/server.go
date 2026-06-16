@@ -36,11 +36,15 @@ type Config struct {
 	// Fiber 配置
 	FiberConfig fiber.Config // Fiber 应用配置
 	// 中间件配置
-	EnableCORS     bool       // 是否启用 CORS，默认 true
-	CORSConfig     CORSConfig // CORS 配置
-	EnableRecovery bool       // 是否启用恢复中间件，默认 true
-	EnableLogging  bool       // 是否启用日志中间件，默认 true
-	EnableTrace    bool       // 是否启用链路追踪中间件，默认 true
+	EnableCORS      bool       // 是否启用 CORS，默认 true
+	CORSConfig      CORSConfig // CORS 配置
+	EnableRecovery  bool       // 是否启用恢复中间件，默认 true
+	EnableLogging   bool       // 是否启用日志中间件，默认 true
+	EnableTrace     bool       // 是否启用链路追踪中间件，默认 true
+	DisableCORS     bool       // 显式禁用 CORS 中间件
+	DisableRecovery bool       // 显式禁用恢复中间件
+	DisableLogging  bool       // 显式禁用日志中间件
+	DisableTrace    bool       // 显式禁用链路追踪中间件
 	// 自定义中间件
 	Middlewares []fiber.Handler // 自定义中间件列表
 }
@@ -103,10 +107,10 @@ func (c *Config) applyMiddlewareDefaults() {
 	if c.EnableCORS || c.EnableRecovery || c.EnableLogging || c.EnableTrace {
 		return
 	}
-	c.EnableCORS = true
-	c.EnableRecovery = true
-	c.EnableLogging = true
-	c.EnableTrace = true
+	c.EnableCORS = !c.DisableCORS
+	c.EnableRecovery = !c.DisableRecovery
+	c.EnableLogging = !c.DisableLogging
+	c.EnableTrace = !c.DisableTrace
 }
 
 // registerDefaultMiddlewares 注册默认中间件
@@ -225,17 +229,28 @@ func (s *Server) StartAsync() error {
 	}
 
 	listener := s.getListener()
+	serveErr := make(chan error, 1)
 	go func() {
 		ctx := context.Background()
 		logger.Info(ctx, "HTTP server starting on %s", s.GetAddress())
 		if err := s.app.Listener(listener); err != nil {
 			if !isHTTPServerClosedError(err) {
 				logger.Error(ctx, "HTTP server failed to start: %v", err)
+				s.clearRuntimeState()
+				serveErr <- err
+				return
 			}
 		}
 		s.clearRuntimeState()
+		serveErr <- nil
 	}()
-	return nil
+
+	select {
+	case err := <-serveErr:
+		return err
+	case <-time.After(100 * time.Millisecond):
+		return nil
+	}
 }
 
 // Stop 停止 HTTP 服务器

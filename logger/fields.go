@@ -27,13 +27,13 @@ const (
 	FieldGRPCMethod  = "grpc_method"  // gRPC 方法名
 
 	// 服务相关
-	FieldService     = "service"      // 服务名称
-	FieldVersion     = "version"      // 服务版本
-	FieldEnvironment = "environment"  // 环境（local/develop/release/production）
-	FieldHostname    = "hostname"     // 主机名
-	FieldInstanceID  = "instance_id"  // 实例 ID
-	FieldPodName     = "pod_name"     // Kubernetes Pod 名称
-	FieldNamespace   = "namespace"    // Kubernetes 命名空间
+	FieldService     = "service"     // 服务名称
+	FieldVersion     = "version"     // 服务版本
+	FieldEnvironment = "environment" // 环境（local/develop/release/production）
+	FieldHostname    = "hostname"    // 主机名
+	FieldInstanceID  = "instance_id" // 实例 ID
+	FieldPodName     = "pod_name"    // Kubernetes Pod 名称
+	FieldNamespace   = "namespace"   // Kubernetes 命名空间
 
 	// 错误相关
 	FieldError      = "error"       // 错误信息
@@ -67,9 +67,9 @@ const (
 	FieldMQGroupID   = "mq_group_id"  // 消费组 ID
 
 	// 通用业务字段
-	FieldAction   = "action"    // 操作动作
-	FieldResource = "resource"  // 资源类型
-	FieldModule   = "module"    // 模块名
+	FieldAction    = "action"    // 操作动作
+	FieldResource  = "resource"  // 资源类型
+	FieldModule    = "module"    // 模块名
 	FieldComponent = "component" // 组件名
 )
 

@@ -31,12 +31,16 @@ func Middleware() fiber.Handler {
 
 		// 创建 span
 		tracer := GetTracer()
-		spanName := c.Method() + " " + c.Path()
+		route := c.Route().Path
+		if route == "" {
+			route = c.Path()
+		}
+		spanName := c.Method() + " " + route
 		ctx, span := tracer.Start(ctx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
 				semconv.HTTPMethodKey.String(c.Method()),
-				semconv.HTTPRouteKey.String(c.Path()),
+				semconv.HTTPRouteKey.String(route),
 				semconv.HTTPURLKey.String(c.OriginalURL()),
 				semconv.NetHostNameKey.String(c.Hostname()),
 				attribute.String("net.sock.peer.addr", c.IP()),
@@ -51,7 +55,7 @@ func Middleware() fiber.Handler {
 		c.Locals("trace_ctx", ctx)
 		// 同时设置到 UserContext（Fiber 的标准方式）
 		c.SetUserContext(ctx)
-		
+
 		// 提取 trace ID 并存储到 Locals 中（供 http.GetTraceID 使用）
 		traceID := GetTraceIDFromContext(ctx)
 		if traceID != "" {

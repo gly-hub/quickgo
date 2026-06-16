@@ -18,9 +18,9 @@ type ShutdownFunc func(ctx context.Context) error
 
 // ShutdownHook 关闭钩子
 type ShutdownHook struct {
-	Name     string       // 钩子名称
-	Priority int          // 优先级（数字越小越先执行）
-	Func     ShutdownFunc // 关闭函数
+	Name     string        // 钩子名称
+	Priority int           // 优先级（数字越小越先执行）
+	Func     ShutdownFunc  // 关闭函数
 	Timeout  time.Duration // 单独的超时时间（0表示使用全局超时）
 }
 

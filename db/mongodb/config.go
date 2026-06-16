@@ -19,10 +19,10 @@ type MongoConfig struct {
 	// 认证数据库（不使用 URI 时）
 	AuthSource string `json:"authSource" yaml:"authSource" toml:"authSource"`
 	// 连接池配置
-	MaxPoolSize     uint64 `json:"maxPoolSize" yaml:"maxPoolSize" toml:"maxPoolSize"`         // 最大连接池大小
-	MinPoolSize     uint64 `json:"minPoolSize" yaml:"minPoolSize" toml:"minPoolSize"`         // 最小连接池大小
+	MaxPoolSize     uint64 `json:"maxPoolSize" yaml:"maxPoolSize" toml:"maxPoolSize"`             // 最大连接池大小
+	MinPoolSize     uint64 `json:"minPoolSize" yaml:"minPoolSize" toml:"minPoolSize"`             // 最小连接池大小
 	MaxConnIdleTime string `json:"maxConnIdleTime" yaml:"maxConnIdleTime" toml:"maxConnIdleTime"` // 连接最大空闲时间（如：30m、1h）
-	ConnectTimeout  string `json:"connectTimeout" yaml:"connectTimeout" toml:"connectTimeout"`     // 连接超时时间（如：10s、30s）
+	ConnectTimeout  string `json:"connectTimeout" yaml:"connectTimeout" toml:"connectTimeout"`    // 连接超时时间（如：10s、30s）
 	SocketTimeout   string `json:"socketTimeout" yaml:"socketTimeout" toml:"socketTimeout"`       // Socket 超时时间（如：30s、1m）
 	// 其他选项
 	Options map[string]string `json:"options" yaml:"options" toml:"options"`
@@ -33,4 +33,3 @@ type MongoManagerConfig struct {
 	// 数据库配置列表
 	Databases []MongoConfig `json:"databases" yaml:"databases" toml:"databases"`
 }
-
