@@ -53,6 +53,7 @@ func NewHTTPServer(config *HTTPServerConfig) (*HTTPServer, error) {
 	if config == nil {
 		return nil, errors.New("config is nil")
 	}
+	config = cloneHTTPServerConfig(config)
 
 	// 设置默认值
 	if config.Address == "" {
@@ -100,6 +101,14 @@ func NewHTTPServer(config *HTTPServerConfig) (*HTTPServer, error) {
 		server: server,
 		config: config,
 	}, nil
+}
+
+func cloneHTTPServerConfig(config *HTTPServerConfig) *HTTPServerConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	return &cloned
 }
 
 // Start 启动 HTTP 服务器

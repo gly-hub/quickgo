@@ -2,8 +2,11 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -21,6 +24,9 @@ type Server struct {
 	port     int
 	config   Config
 	listener net.Listener
+	mu       sync.RWMutex
+	running  bool
+	stopped  bool
 }
 
 // Config HTTP服务器配置
@@ -58,6 +64,7 @@ func NewServer(config Config) (*Server, error) {
 	if config.Port == 0 {
 		config.Port = 8080
 	}
+	config.applyMiddlewareDefaults()
 
 	// 设置 Fiber 默认配置
 	fiberCfg := config.FiberConfig
@@ -90,6 +97,16 @@ func NewServer(config Config) (*Server, error) {
 	}
 
 	return server, nil
+}
+
+func (c *Config) applyMiddlewareDefaults() {
+	if c.EnableCORS || c.EnableRecovery || c.EnableLogging || c.EnableTrace {
+		return
+	}
+	c.EnableCORS = true
+	c.EnableRecovery = true
+	c.EnableLogging = true
+	c.EnableTrace = true
 }
 
 // registerDefaultMiddlewares 注册默认中间件
@@ -148,17 +165,41 @@ func (s *Server) GetApp() *fiber.App {
 
 // Start 启动 HTTP 服务器
 func (s *Server) Start() error {
+	if s.isStopped() {
+		return fmt.Errorf("http server already stopped")
+	}
 	if err := s.Listen(); err != nil {
+		return err
+	}
+	if err := s.markRunning(); err != nil {
 		return err
 	}
 
 	ctx := context.Background()
 	logger.Info(ctx, "HTTP server starting on %s", s.GetAddress())
-	return s.app.Listener(s.listener)
+	listener := s.getListener()
+	if err := s.app.Listener(listener); err != nil {
+		s.clearRuntimeState()
+		if isHTTPServerClosedError(err) {
+			return nil
+		}
+		return err
+	}
+	s.clearRuntimeState()
+	return nil
 }
 
 // Listen 绑定监听地址，但不启动 HTTP 服务。
 func (s *Server) Listen() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.stopped {
+		return fmt.Errorf("http server already stopped")
+	}
+	if s.running {
+		return fmt.Errorf("http server already running")
+	}
 	if s.listener != nil {
 		return nil
 	}
@@ -173,16 +214,26 @@ func (s *Server) Listen() error {
 
 // StartAsync 异步启动 HTTP 服务器
 func (s *Server) StartAsync() error {
+	if s.isStopped() {
+		return fmt.Errorf("http server already stopped")
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
+	if err := s.markRunning(); err != nil {
+		return err
+	}
 
+	listener := s.getListener()
 	go func() {
 		ctx := context.Background()
 		logger.Info(ctx, "HTTP server starting on %s", s.GetAddress())
-		if err := s.app.Listener(s.listener); err != nil {
-			logger.Error(ctx, "HTTP server failed to start: %v", err)
+		if err := s.app.Listener(listener); err != nil {
+			if !isHTTPServerClosedError(err) {
+				logger.Error(ctx, "HTTP server failed to start: %v", err)
+			}
 		}
+		s.clearRuntimeState()
 	}()
 	return nil
 }
@@ -190,13 +241,95 @@ func (s *Server) StartAsync() error {
 // Stop 停止 HTTP 服务器
 func (s *Server) Stop() error {
 	ctx := context.Background()
+	if s.isStopped() {
+		return nil
+	}
 	logger.Info(ctx, "HTTP server shutting down...")
-	return s.app.Shutdown()
+	err := errors.Join(s.app.Shutdown(), s.closeListener())
+	s.setStopped()
+	if isHTTPServerClosedError(err) {
+		return nil
+	}
+	return err
 }
 
 // GetAddress 获取服务器地址
 func (s *Server) GetAddress() string {
 	return fmt.Sprintf("%s:%d", s.address, s.port)
+}
+
+// IsRunning 检查 HTTP 服务器是否正在运行。
+func (s *Server) IsRunning() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.running
+}
+
+func (s *Server) markRunning() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return fmt.Errorf("http server already stopped")
+	}
+	if s.running {
+		return fmt.Errorf("http server already running")
+	}
+	if s.listener == nil {
+		return fmt.Errorf("http server listener is not initialized")
+	}
+	s.running = true
+	return nil
+}
+
+func (s *Server) getListener() net.Listener {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.listener
+}
+
+func (s *Server) clearRuntimeState() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.running = false
+	s.listener = nil
+}
+
+func (s *Server) closeListener() error {
+	s.mu.Lock()
+	listener := s.listener
+	s.running = false
+	s.listener = nil
+	s.mu.Unlock()
+
+	if listener == nil {
+		return nil
+	}
+	if err := listener.Close(); err != nil && !isHTTPServerClosedError(err) {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) setStopped() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = true
+}
+
+func (s *Server) isStopped() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.stopped
+}
+
+func isHTTPServerClosedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, net.ErrClosed) ||
+		strings.Contains(err.Error(), "use of closed network connection") ||
+		strings.Contains(err.Error(), "Server closed") ||
+		strings.Contains(err.Error(), "server is not running")
 }
 
 // defaultErrorHandler 默认错误处理器

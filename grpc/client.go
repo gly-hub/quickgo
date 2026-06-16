@@ -194,7 +194,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer cancel()
 
 	// 连接服务器
-	conn, err := grpc.DialContext(connectCtx, c.address, c.options...)
+	options := append([]grpc.DialOption{}, c.options...)
+	options = append(options, grpc.WithBlock())
+	conn, err := grpc.DialContext(connectCtx, c.address, options...)
 	if err != nil {
 		logger.Error(ctx, "Failed to connect to gRPC server: address=%s, error=%v", c.address, err)
 		return fmt.Errorf("failed to connect to %s: %w", c.address, err)
@@ -222,7 +224,7 @@ func (c *Client) IsConnected() bool {
 		return false
 	}
 	state := c.conn.GetState()
-	return state == connectivity.Ready || state == connectivity.Idle
+	return state == connectivity.Ready
 }
 
 // Close 关闭连接

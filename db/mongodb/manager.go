@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -33,7 +34,12 @@ func NewManager(config *MongoManagerConfig) (*Manager, error) {
 	for i := range config.Databases {
 		dbConfig := &config.Databases[i]
 		if dbConfig.Name == "" {
+			_ = manager.Close()
 			return nil, fmt.Errorf("database[%d] name is required", i)
+		}
+		if _, exists := manager.clients[dbConfig.Name]; exists {
+			_ = manager.Close()
+			return nil, fmt.Errorf("database[%d] duplicate name: %s", i, dbConfig.Name)
 		}
 
 		logger.Info(ctx, "Connecting to MongoDB: name=%s", dbConfig.Name)
@@ -41,6 +47,7 @@ func NewManager(config *MongoManagerConfig) (*Manager, error) {
 		client, err := NewClient(dbConfig)
 		if err != nil {
 			// 连接失败，返回错误，阻止服务启动
+			_ = manager.Close()
 			return nil, fmt.Errorf("failed to connect to MongoDB %s (service cannot start without MongoDB): %w", dbConfig.Name, err)
 		}
 
@@ -129,15 +136,15 @@ func (m *Manager) HealthCheck(ctx context.Context) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var errors []error
+	var errs []error
 	for name, client := range m.clients {
 		if err := client.HealthCheck(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("database %s: %w", name, err))
+			errs = append(errs, fmt.Errorf("database %s: %w", name, err))
 		}
 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf("health check failed: %v", errors)
+	if len(errs) > 0 {
+		return fmt.Errorf("health check failed: %w", errors.Join(errs...))
 	}
 
 	return nil
@@ -151,10 +158,10 @@ func (m *Manager) Close() error {
 	ctx := context.Background()
 	logger.Info(ctx, "Closing MongoDB Manager: total_clients=%d", len(m.clients))
 
-	var errors []error
+	var errs []error
 	for name, client := range m.clients {
 		if err := client.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("failed to close client %s: %w", name, err))
+			errs = append(errs, fmt.Errorf("failed to close client %s: %w", name, err))
 			logger.Error(ctx, "Failed to close MongoDB client: name=%s, error=%v", name, err)
 		} else {
 			logger.Info(ctx, "MongoDB client closed: name=%s", name)
@@ -163,8 +170,8 @@ func (m *Manager) Close() error {
 
 	m.clients = make(map[string]*Client)
 
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to close some clients: %v", errors)
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to close some clients: %w", errors.Join(errs...))
 	}
 
 	logger.Info(ctx, "MongoDB Manager closed successfully")

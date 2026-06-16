@@ -74,6 +74,7 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 	if config == nil {
 		return nil, errors.New("config is nil")
 	}
+	config = cloneGrpcClientConfig(config)
 
 	// 设置默认连接池大小
 	if config.PoolSize <= 0 {
@@ -118,7 +119,7 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 
 	// 如果配置了 etcd，创建共享的 resolver
 	if config.Etcd != nil {
-		dialTimeout, err := time.ParseDuration(config.Etcd.DialTimeout)
+		dialTimeout, err := parseDurationOrDefault(config.Etcd.DialTimeout, defaultEtcdDialTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse etcd dial timeout: %w", err)
 		}
@@ -389,7 +390,7 @@ func (p *clientPool) close() error {
 	p.reconnecting = make(map[int]bool)
 
 	if len(errs) > 0 {
-		return fmt.Errorf("failed to close some clients: %v", errs)
+		return fmt.Errorf("failed to close some clients: %w", errors.Join(errs...))
 	}
 	return nil
 }
@@ -411,7 +412,7 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var errors []error
+	var errs []error
 	for serviceName := range m.services {
 		if _, exists := m.clientPools[serviceName]; exists {
 			continue // 已经连接
@@ -419,7 +420,7 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 
 		pool, err := m.createClientPool(ctx, serviceName)
 		if err != nil {
-			errors = append(errors, fmt.Errorf("service %s: %w", serviceName, err))
+			errs = append(errs, fmt.Errorf("service %s: %w", serviceName, err))
 			continue
 		}
 
@@ -427,8 +428,8 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 		logger.Info(ctx, "Connected gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to connect some clients: %v", errors)
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to connect some clients: %w", errors.Join(errs...))
 	}
 
 	return nil
@@ -462,10 +463,10 @@ func (m *GrpcClientManager) CloseAll() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var errors []error
+	var errs []error
 	for serviceName, pool := range m.clientPools {
 		if err := pool.close(); err != nil {
-			errors = append(errors, fmt.Errorf("service %s: %w", serviceName, err))
+			errs = append(errs, fmt.Errorf("service %s: %w", serviceName, err))
 		} else {
 			logger.Info(context.Background(), "Closed gRPC client pool: service=%s", serviceName)
 		}
@@ -473,9 +474,12 @@ func (m *GrpcClientManager) CloseAll() error {
 
 	// 清空
 	m.clientPools = make(map[string]*clientPool)
+	// etcdResolver is registered in gRPC's process-global resolver registry.
+	// Closing it here would leave the global builder pointing at a closed client.
+	m.etcdResolver = nil
 
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to close some clients: %v", errors)
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to close some clients: %w", errors.Join(errs...))
 	}
 
 	return nil
@@ -754,12 +758,17 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 	if config == nil {
 		return nil, errors.New("config is nil")
 	}
+	config = cloneGrpcClientConfig(config)
 
 	// 解析超时时间
-	timeout, err := time.ParseDuration(config.Timeout)
-	if err != nil {
-		logger.Error(context.Background(), "Failed to parse GrpcClientConfig.Timeout: %v", err)
-		return nil, err
+	var timeout time.Duration
+	var err error
+	if config.Timeout != "" {
+		timeout, err = time.ParseDuration(config.Timeout)
+		if err != nil {
+			logger.Error(context.Background(), "Failed to parse GrpcClientConfig.Timeout: %v", err)
+			return nil, err
+		}
 	}
 
 	// 解析 KeepAlive 时间
@@ -811,7 +820,7 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 	// 如果配置了 etcd，使用 etcd 服务发现
 	var etcdResolver *grpc.EtcdResolver
 	if config.Etcd != nil {
-		dialTimeout, err := time.ParseDuration(config.Etcd.DialTimeout)
+		dialTimeout, err := parseDurationOrDefault(config.Etcd.DialTimeout, defaultEtcdDialTimeout)
 		if err != nil {
 			logger.Error(context.Background(), "Failed to parse GrpcClientConfig.Etcd.DialTimeout: %v", err)
 			return nil, err
@@ -863,6 +872,25 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 	}, nil
 }
 
+func cloneGrpcClientConfig(config *GrpcClientConfig) *GrpcClientConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	if config.StaticAddresses != nil {
+		cloned.StaticAddresses = make(map[string]string, len(config.StaticAddresses))
+		for service, address := range config.StaticAddresses {
+			cloned.StaticAddresses[service] = address
+		}
+	}
+	if config.Etcd != nil {
+		etcd := *config.Etcd
+		etcd.Endpoints = append([]string(nil), config.Etcd.Endpoints...)
+		cloned.Etcd = &etcd
+	}
+	return &cloned
+}
+
 // Connect 连接到 gRPC 服务器
 func (c *GrpcClient) Connect(ctx context.Context) error {
 	if c.client == nil {
@@ -906,14 +934,23 @@ func (c *GrpcClient) HealthCheck(ctx context.Context, service string) error {
 
 // Close 关闭客户端连接
 func (c *GrpcClient) Close() error {
+	var errs []error
 	if c.client != nil {
 		if err := c.client.Close(); err != nil {
 			logger.Error(context.Background(), "Failed to close grpc client: %v", err)
-			return err
+			errs = append(errs, err)
 		}
+		c.client = nil
 	}
+	// etcdResolver is registered in gRPC's process-global resolver registry.
+	// Closing it here would leave the global builder pointing at a closed client.
+	c.etcdResolver = nil
+	c.serviceDiscovery = nil
 
 	logger.Info(context.Background(), "gRPC client closed")
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to close grpc client: %w", errors.Join(errs...))
+	}
 	return nil
 }
 
