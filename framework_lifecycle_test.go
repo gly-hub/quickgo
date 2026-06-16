@@ -3,6 +3,8 @@ package quickgo
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -210,5 +212,85 @@ func TestFrameworkMetricsPropagateToServersWithoutMutatingInput(t *testing.T) {
 	metricsConfig.Buckets[0] = 9
 	if f.config.HTTPServer.Metrics.Buckets[0] == 9 || f.config.GrpcServer.Metrics.Buckets[0] == 9 {
 		t.Fatal("expected propagated metrics buckets to be cloned")
+	}
+	if f.HTTPServer().Metrics() == nil || f.GrpcServer().Metrics() == nil {
+		t.Fatal("expected servers to use metrics collectors")
+	}
+	if f.HTTPServer().Metrics() != f.GrpcServer().Metrics() || f.Metrics() != f.HTTPServer().Metrics() {
+		t.Fatal("expected framework HTTP and gRPC servers to share one metrics collector")
+	}
+}
+
+func TestFrameworkHTTPMetricsEndpointExposesSharedGRPCMetrics(t *testing.T) {
+	f, err := NewFramework(
+		ConfigOptionWithLogger(LoggerConfig{Enabled: false}),
+		ConfigOptionWithMetrics(&metrics.Config{Namespace: "suite"}),
+		ConfigOptionWithHTTPServer(&HTTPServerConfig{Enabled: true}),
+		ConfigOptionWithGrpcServer(&GrpcServerConfig{}),
+	)
+	if err != nil {
+		t.Fatalf("NewFramework failed: %v", err)
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer f.Stop()
+
+	f.GrpcServer().Metrics().RecordGRPCRequest("/svc/Method", "OK", 0)
+	resp, err := f.HTTPServer().GetApp().Test(httptest.NewRequest("GET", "/metrics", nil))
+	if err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics body failed: %v", err)
+	}
+	if !strings.Contains(string(body), `suite_grpc_requests_total{code="OK",method="/svc/Method"} 1`) {
+		t.Fatalf("expected HTTP metrics endpoint to expose gRPC metrics, got %s", string(body))
+	}
+}
+
+type frameworkAccessComponent struct {
+	name      string
+	enabled   bool
+	framework *Framework
+}
+
+func (c *frameworkAccessComponent) Name() string { return c.name }
+
+func (c *frameworkAccessComponent) IsEnabled() bool { return c.enabled }
+
+func (c *frameworkAccessComponent) Init(ctx context.Context) error {
+	_, err := c.framework.GetComponent(c.name)
+	return err
+}
+
+func (c *frameworkAccessComponent) Start(ctx context.Context) error {
+	_, err := c.framework.GetComponent(c.name)
+	return err
+}
+
+func (c *frameworkAccessComponent) Stop(ctx context.Context) error {
+	_, err := c.framework.GetComponent(c.name)
+	return err
+}
+
+func TestFrameworkLifecycleAllowsComponentCallbacksToAccessFramework(t *testing.T) {
+	f, err := NewFramework(ConfigOptionWithLogger(LoggerConfig{Enabled: false}))
+	if err != nil {
+		t.Fatalf("NewFramework failed: %v", err)
+	}
+	component := &frameworkAccessComponent{name: "self", enabled: true, framework: f}
+	if err := f.RegisterComponent(component); err != nil {
+		t.Fatalf("RegisterComponent failed: %v", err)
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	if err := f.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if err := f.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
 	}
 }

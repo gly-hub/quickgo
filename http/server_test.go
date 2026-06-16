@@ -87,6 +87,29 @@ func TestServerZeroConfigEnablesDefaultMiddlewares(t *testing.T) {
 	}
 }
 
+func TestServerExplicitEnableDoesNotDisableOtherDefaultMiddlewares(t *testing.T) {
+	server, err := NewServer(Config{
+		EnableCORS: true,
+		FiberConfig: fiber.Config{
+			DisableStartupMessage: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	server.GetApp().Get("/ok", func(c *fiber.Ctx) error {
+		return c.SendString("ok")
+	})
+
+	resp, err := server.GetApp().Test(httptest.NewRequest("GET", "/ok", nil))
+	if err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+	if got := resp.Header.Get(TraceIDHeader); got == "" {
+		t.Fatal("expected trace middleware to remain enabled")
+	}
+}
+
 func TestServerStartAsyncRejectsDuplicateStart(t *testing.T) {
 	port := reserveTCPPort(t)
 	server, err := NewServer(Config{

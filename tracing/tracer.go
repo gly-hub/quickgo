@@ -149,9 +149,6 @@ func Init(config *Config) error {
 	if samplingRate > 1 {
 		samplingRate = 1
 	}
-	if samplingRate == 0 {
-		samplingRate = 1.0 // 默认采样所有请求
-	}
 
 	// 创建 TracerProvider
 	var newProvider *tracesdk.TracerProvider

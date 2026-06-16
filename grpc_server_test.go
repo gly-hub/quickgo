@@ -59,8 +59,29 @@ func TestGrpcServerRegisterAddressPrefersExplicitValue(t *testing.T) {
 		t.Fatalf("NewGrpcServer failed: %v", err)
 	}
 
-	if got := server.registerAddress(); got != "10.0.0.12:50051" {
+	got, err := server.registerAddress()
+	if err != nil {
+		t.Fatalf("registerAddress failed: %v", err)
+	}
+	if got != "10.0.0.12:50051" {
 		t.Fatalf("expected explicit register address, got %q", got)
+	}
+}
+
+func TestGrpcServerRegisterAddressRequiresExplicitAddressForEtcdWildcardListen(t *testing.T) {
+	t.Setenv("SERVER_IP", "")
+
+	server, err := NewGrpcServer(&GrpcServerConfig{
+		ServiceName: "svc",
+		Address:     "0.0.0.0",
+		Etcd:        &EtcdConfig{Endpoints: []string{"127.0.0.1:2379"}},
+	})
+	if err != nil {
+		t.Fatalf("NewGrpcServer failed: %v", err)
+	}
+
+	if _, err := server.registerAddress(); err == nil || !strings.Contains(err.Error(), "registerAddress") {
+		t.Fatalf("expected register address error, got %v", err)
 	}
 }
 
