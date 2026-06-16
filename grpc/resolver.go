@@ -101,6 +101,7 @@ func (r *StaticResolver) DiscoveryKey() string {
 // resolverBuilder gRPC resolver builder
 type resolverBuilder struct {
 	scheme string
+	mu     sync.RWMutex
 	sd     ServiceDiscovery
 }
 
@@ -114,10 +115,17 @@ func newResolverBuilder(scheme string, sd ServiceDiscovery) *resolverBuilder {
 
 // Build 构建 resolver
 func (b *resolverBuilder) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (resolver.Resolver, error) {
+	b.mu.RLock()
+	sd := b.sd
+	b.mu.RUnlock()
+	if sd == nil {
+		return nil, fmt.Errorf("resolver scheme %s is not active", b.scheme)
+	}
+
 	r := &serviceResolver{
 		target: target,
 		cc:     cc,
-		sd:     b.sd,
+		sd:     sd,
 		ctx:    context.Background(),
 	}
 
@@ -130,6 +138,12 @@ func (b *resolverBuilder) Build(target resolver.Target, cc resolver.ClientConn, 
 // Scheme 返回 scheme
 func (b *resolverBuilder) Scheme() string {
 	return b.scheme
+}
+
+func (b *resolverBuilder) setDiscovery(sd ServiceDiscovery) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sd = sd
 }
 
 // serviceResolver gRPC resolver 实现
@@ -253,8 +267,10 @@ func (r *serviceResolver) Close() {
 }
 
 type registeredResolver struct {
-	key string
-	sd  ServiceDiscovery
+	key     string
+	sd      ServiceDiscovery
+	builder *resolverBuilder
+	refs    int
 }
 
 // registeredSchemes 记录已注册的 scheme 配置，避免同一 scheme 混用不同配置。
@@ -276,18 +292,54 @@ func RegisterResolverAndGet(scheme string, sd ServiceDiscovery) (ServiceDiscover
 
 	// 检查是否已经注册过
 	if registered, ok := registeredSchemes[scheme]; ok {
-		if registered.key != key {
+		if registered.refs > 0 && registered.key != key {
 			return nil, fmt.Errorf("resolver scheme %s already registered with a different config", scheme)
 		}
+		if registered.refs == 0 {
+			registered.key = key
+			registered.sd = sd
+			registered.builder.setDiscovery(sd)
+		}
+		registered.refs++
+		registeredSchemes[scheme] = registered
 		logger.Debug(context.Background(), "Resolver already registered, skipping: scheme=%s", scheme)
 		return registered.sd, nil
 	}
 
 	builder := newResolverBuilder(scheme, sd)
 	resolver.Register(builder)
-	registeredSchemes[scheme] = registeredResolver{key: key, sd: sd}
+	registeredSchemes[scheme] = registeredResolver{key: key, sd: sd, builder: builder, refs: 1}
 	logger.Info(context.Background(), "Resolver registered: scheme=%s", scheme)
 	return sd, nil
+}
+
+// ReleaseResolver releases one registration reference for a scheme/config pair.
+// gRPC resolver builders are process-global and cannot be unregistered, so the
+// scheme entry remains, but the underlying discovery is closed when no clients
+// still reference it.
+func ReleaseResolver(scheme string, sd ServiceDiscovery) error {
+	registeredSchemesMu.Lock()
+	defer registeredSchemesMu.Unlock()
+
+	registered, ok := registeredSchemes[scheme]
+	if !ok {
+		return nil
+	}
+	if registered.sd != sd && registered.key != resolverConfigKey(sd) {
+		return nil
+	}
+	if registered.refs > 0 {
+		registered.refs--
+	}
+	if registered.refs == 0 && registered.sd != nil {
+		if err := registered.sd.Close(); err != nil {
+			return err
+		}
+		registered.sd = nil
+		registered.builder.setDiscovery(nil)
+	}
+	registeredSchemes[scheme] = registered
+	return nil
 }
 
 // RegisterStaticResolver 注册静态服务发现

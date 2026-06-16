@@ -146,7 +146,12 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 		if registeredResolver != resolver {
 			resolver.Close()
 		}
-		manager.etcdResolver = registeredResolver.(*grpc.EtcdResolver)
+		etcdResolver, ok := registeredResolver.(*grpc.EtcdResolver)
+		if !ok {
+			_ = grpc.ReleaseResolver(grpc.EtcdScheme, registeredResolver)
+			return nil, fmt.Errorf("registered resolver for scheme %s is %T, expected *grpc.EtcdResolver", grpc.EtcdScheme, registeredResolver)
+		}
+		manager.etcdResolver = etcdResolver
 	}
 
 	return manager, nil
@@ -339,6 +344,7 @@ func (m *GrpcClientManager) createClientPool(ctx context.Context, serviceName st
 
 		if err := client.Connect(ctx); err != nil {
 			// 关闭已创建的连接
+			client.Close()
 			for _, c := range pool.clients {
 				c.Close()
 			}
@@ -474,8 +480,11 @@ func (m *GrpcClientManager) CloseAll() error {
 
 	// 清空
 	m.clientPools = make(map[string]*clientPool)
-	// etcdResolver is registered in gRPC's process-global resolver registry.
-	// Closing it here would leave the global builder pointing at a closed client.
+	if m.etcdResolver != nil {
+		if err := grpc.ReleaseResolver(grpc.EtcdScheme, m.etcdResolver); err != nil {
+			errs = append(errs, fmt.Errorf("release etcd resolver: %w", err))
+		}
+	}
 	m.etcdResolver = nil
 
 	if len(errs) > 0 {
@@ -851,7 +860,12 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 		if registeredResolver != etcdResolver {
 			etcdResolver.Close()
 		}
-		etcdResolver = registeredResolver.(*grpc.EtcdResolver)
+		registeredEtcdResolver, ok := registeredResolver.(*grpc.EtcdResolver)
+		if !ok {
+			_ = grpc.ReleaseResolver(grpc.EtcdScheme, registeredResolver)
+			return nil, fmt.Errorf("registered resolver for scheme %s is %T, expected *grpc.EtcdResolver", grpc.EtcdScheme, registeredResolver)
+		}
+		etcdResolver = registeredEtcdResolver
 
 		// 设置服务发现
 		clientConfig.ServiceDiscovery = etcdResolver
@@ -861,6 +875,9 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 	client, err := grpc.NewClient(clientConfig)
 	if err != nil {
 		logger.Error(context.Background(), "Failed to create grpc client: %v", err)
+		if etcdResolver != nil {
+			_ = grpc.ReleaseResolver(grpc.EtcdScheme, etcdResolver)
+		}
 		return nil, err
 	}
 
@@ -942,8 +959,11 @@ func (c *GrpcClient) Close() error {
 		}
 		c.client = nil
 	}
-	// etcdResolver is registered in gRPC's process-global resolver registry.
-	// Closing it here would leave the global builder pointing at a closed client.
+	if c.etcdResolver != nil {
+		if err := grpc.ReleaseResolver(grpc.EtcdScheme, c.etcdResolver); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	c.etcdResolver = nil
 	c.serviceDiscovery = nil
 

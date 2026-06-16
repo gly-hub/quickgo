@@ -10,6 +10,7 @@ import (
 
 	"github.com/team-dandelion/quickgo/grpc"
 	"github.com/team-dandelion/quickgo/logger"
+	"github.com/team-dandelion/quickgo/metrics"
 	"github.com/team-dandelion/quickgo/tracing"
 
 	rpc "google.golang.org/grpc"
@@ -30,6 +31,8 @@ type GrpcServerConfig struct {
 	ServiceName string `json:"serviceName" yaml:"serviceName" toml:"serviceName"`
 	// 服务地址 示例：127.0.0.1:50051
 	Address string `json:"address" yaml:"address" toml:"address"`
+	// 注册到服务发现的地址，示例：10.0.0.12:50051。为空时按 SERVER_IP/本机地址推断。
+	RegisterAddress string `json:"registerAddress" yaml:"registerAddress" toml:"registerAddress"`
 	// 服务端口 示例：50051
 	Port int `json:"port" yaml:"port" toml:"port"`
 	// 最大连接空闲时间 示例：5s
@@ -44,6 +47,8 @@ type GrpcServerConfig struct {
 	KeepAliveTimeout string `json:"keepAliveTimeout" yaml:"keepAliveTimeout" toml:"keepAliveTimeout"`
 	// Etcd 配置（使用 etcd 服务发现时必需，全局共享）
 	Etcd *EtcdConfig `json:"etcd" yaml:"etcd" toml:"etcd"`
+	// Metrics 配置（可选）
+	Metrics *metrics.Config `json:"metrics" yaml:"metrics" toml:"metrics"`
 }
 
 type EtcdConfig struct {
@@ -103,6 +108,11 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 	streamInterceptors := []rpc.StreamServerInterceptor{
 		grpc.StreamLoggingInterceptor(),
 	}
+	if config.Metrics != nil {
+		m := metrics.New(*config.Metrics)
+		unaryInterceptors = append(unaryInterceptors, metrics.UnaryServerInterceptor(m))
+		streamInterceptors = append(streamInterceptors, metrics.StreamServerInterceptor(m))
+	}
 
 	// 如果启用了 OpenTelemetry tracing，添加 tracing 拦截器
 	if tracing.IsEnabled() {
@@ -145,15 +155,7 @@ func (s *GrpcServer) Start() error {
 		return errors.New("grpc server is nil")
 	}
 
-	// 获取服务器地址（用于注册到 etcd）
-	// 注意：不能使用 0.0.0.0，因为客户端无法连接到 0.0.0.0
-	// 需要使用实际可访问的 IP 地址
-	serverIP := s.getLocalIP()
-	if serverIP == "0.0.0.0" {
-		// 如果获取到 0.0.0.0，使用 127.0.0.1（本地开发环境）
-		serverIP = "127.0.0.1"
-	}
-	serverAddress := fmt.Sprintf("%s:%d", serverIP, s.config.Port)
+	serverAddress := s.registerAddress()
 	logger.Info(context.Background(), "Server will listen on %s:%d, register address: %s", s.config.Address, s.config.Port, serverAddress)
 
 	if err := s.server.StartAsync(); err != nil {
@@ -220,6 +222,9 @@ func (s *GrpcServer) rollbackStartedServer(startErr error) error {
 }
 
 func (s *GrpcServer) Stop() error {
+	if s == nil || s.server == nil {
+		return nil
+	}
 	// 如果有 registrar（etcd 模式），需要注销服务
 	if s.registrar != nil {
 		if err := s.registrar.Deregister(context.Background()); err != nil {
@@ -231,6 +236,7 @@ func (s *GrpcServer) Stop() error {
 			logger.Error(context.Background(), "Failed to close registrar: %v", err)
 			return err
 		}
+		s.registrar = nil
 	}
 
 	if err := s.server.Stop(); err != nil {
@@ -238,6 +244,17 @@ func (s *GrpcServer) Stop() error {
 		return err
 	}
 	return nil
+}
+
+func (s *GrpcServer) registerAddress() string {
+	if s.config.RegisterAddress != "" {
+		return s.config.RegisterAddress
+	}
+	serverIP := s.getLocalIP()
+	if serverIP == "0.0.0.0" {
+		serverIP = "127.0.0.1"
+	}
+	return fmt.Sprintf("%s:%d", serverIP, s.config.Port)
 }
 
 // getLocalIP 获取本地 IP 地址
@@ -276,6 +293,13 @@ func cloneGrpcServerConfig(config *GrpcServerConfig) *GrpcServerConfig {
 		etcd := *config.Etcd
 		etcd.Endpoints = append([]string(nil), config.Etcd.Endpoints...)
 		cloned.Etcd = &etcd
+	}
+	if config.Metrics != nil {
+		metricsConfig := *config.Metrics
+		if config.Metrics.Buckets != nil {
+			metricsConfig.Buckets = append([]float64(nil), config.Metrics.Buckets...)
+		}
+		cloned.Metrics = &metricsConfig
 	}
 	return &cloned
 }

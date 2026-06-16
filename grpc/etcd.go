@@ -40,6 +40,7 @@ type EtcdResolver struct {
 	watchers   map[string]watcherEntry
 	watcherSeq uint64
 	mu         sync.RWMutex
+	closed     bool
 }
 
 type watcherEntry struct {
@@ -182,6 +183,10 @@ func (r *EtcdResolver) Watch(ctx context.Context, serviceName string, callback f
 func (r *EtcdResolver) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 
 	// 取消所有 watcher
 	for _, watcher := range r.watchers {
@@ -190,7 +195,9 @@ func (r *EtcdResolver) Close() error {
 	r.watchers = make(map[string]watcherEntry)
 
 	if r.client != nil {
-		return r.client.Close()
+		err := r.client.Close()
+		r.client = nil
+		return err
 	}
 	return nil
 }

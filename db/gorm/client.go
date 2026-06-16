@@ -3,11 +3,14 @@ package gorm
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/team-dandelion/quickgo/logger"
 
-	"gorm.io/driver/mysql"
+	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/driver/sqlserver"
@@ -45,7 +48,7 @@ func NewClient(config *GormConfig) (*Client, error) {
 	var dialector gorm.Dialector
 	switch config.Master.Type {
 	case DatabaseTypeMySQL:
-		dialector = mysql.Open(masterDSN)
+		dialector = gormmysql.Open(masterDSN)
 	case DatabaseTypePostgreSQL:
 		dialector = postgres.Open(masterDSN)
 	case DatabaseTypeSQLite:
@@ -138,7 +141,7 @@ func NewClient(config *GormConfig) (*Client, error) {
 			var slaveDialector gorm.Dialector
 			switch config.Master.Type {
 			case DatabaseTypeMySQL:
-				slaveDialector = mysql.Open(slaveDSN)
+				slaveDialector = gormmysql.Open(slaveDSN)
 			case DatabaseTypePostgreSQL:
 				slaveDialector = postgres.Open(slaveDSN)
 			case DatabaseTypeSQLite:
@@ -279,14 +282,6 @@ func buildDSN(master MasterConfig) (string, error) {
 
 // buildMySQLDSN 构建 MySQL DSN
 func buildMySQLDSN(master MasterConfig) string {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s",
-		master.User,
-		master.Password,
-		master.Host,
-		master.Port,
-		master.Database,
-	)
-
 	params := make(map[string]string)
 	if master.Charset != "" {
 		params["charset"] = master.Charset
@@ -294,82 +289,79 @@ func buildMySQLDSN(master MasterConfig) string {
 		params["charset"] = "utf8mb4"
 	}
 
+	parseTime := true
 	if master.Timezone != "" {
-		params["parseTime"] = "True"
 		params["loc"] = master.Timezone
 	} else {
-		params["parseTime"] = "True"
 		params["loc"] = "Local"
 	}
 
 	// 添加其他参数
 	for k, v := range master.Params {
+		if k == "parseTime" {
+			parseTime = v == "true" || v == "True" || v == "1"
+			continue
+		}
 		params[k] = v
 	}
 
-	// 构建参数字符串
-	paramStr := ""
-	for k, v := range params {
-		if paramStr != "" {
-			paramStr += "&"
-		}
-		paramStr += fmt.Sprintf("%s=%s", k, v)
-	}
+	cfg := mysqldriver.NewConfig()
+	cfg.User = master.User
+	cfg.Passwd = master.Password
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(master.Host, fmt.Sprintf("%d", master.Port))
+	cfg.DBName = master.Database
+	cfg.ParseTime = parseTime
+	cfg.Params = params
+	return cfg.FormatDSN()
+}
 
-	if paramStr != "" {
-		dsn += "?" + paramStr
+func userInfo(user, password string) *url.Userinfo {
+	if user == "" && password == "" {
+		return nil
 	}
-
-	return dsn
+	if password == "" {
+		return url.User(user)
+	}
+	return url.UserPassword(user, password)
 }
 
 // buildPostgreSQLDSN 构建 PostgreSQL DSN
 func buildPostgreSQLDSN(master MasterConfig) string {
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s",
-		master.Host,
-		master.Port,
-		master.User,
-		master.Password,
-		master.Database,
-	)
+	values := make(url.Values)
+	values.Set("sslmode", "disable")
 
 	if master.SSLMode != "" {
-		dsn += " sslmode=" + master.SSLMode
-	} else {
-		dsn += " sslmode=disable"
+		values.Set("sslmode", master.SSLMode)
 	}
-
-	// 添加其他参数
 	for k, v := range master.Params {
-		dsn += fmt.Sprintf(" %s=%s", k, v)
+		values.Set(k, v)
 	}
 
-	return dsn
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     userInfo(master.User, master.Password),
+		Host:     net.JoinHostPort(master.Host, fmt.Sprintf("%d", master.Port)),
+		Path:     "/" + master.Database,
+		RawQuery: values.Encode(),
+	}
+	return u.String()
 }
 
 // buildSQLServerDSN 构建 SQL Server DSN
 func buildSQLServerDSN(master MasterConfig) string {
-	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
-		master.User,
-		master.Password,
-		master.Host,
-		master.Port,
-		master.Database,
-	)
-
-	// 添加其他参数
-	first := true
+	values := make(url.Values)
+	values.Set("database", master.Database)
 	for k, v := range master.Params {
-		if first {
-			dsn += "&"
-			first = false
-		} else {
-			dsn += "&"
-		}
-		dsn += fmt.Sprintf("%s=%s", k, v)
+		values.Set(k, v)
 	}
-
-	return dsn
+	u := url.URL{
+		Scheme:   "sqlserver",
+		User:     userInfo(master.User, master.Password),
+		Host:     net.JoinHostPort(master.Host, fmt.Sprintf("%d", master.Port)),
+		RawQuery: values.Encode(),
+	}
+	return u.String()
 }
 
 // buildSlaveDSN 构建从库 DSN
@@ -390,14 +382,6 @@ func buildSlaveDSN(dbType DatabaseType, slave SlaveConfig) (string, error) {
 
 // buildMySQLSlaveDSN 构建 MySQL 从库 DSN
 func buildMySQLSlaveDSN(slave SlaveConfig) string {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s",
-		slave.User,
-		slave.Password,
-		slave.Host,
-		slave.Port,
-		slave.Database,
-	)
-
 	params := make(map[string]string)
 	if slave.Charset != "" {
 		params["charset"] = slave.Charset
@@ -405,80 +389,69 @@ func buildMySQLSlaveDSN(slave SlaveConfig) string {
 		params["charset"] = "utf8mb4"
 	}
 
+	parseTime := true
 	if slave.Timezone != "" {
-		params["parseTime"] = "True"
 		params["loc"] = slave.Timezone
 	} else {
-		params["parseTime"] = "True"
 		params["loc"] = "Local"
 	}
 
 	// 添加其他参数
 	for k, v := range slave.Params {
+		if k == "parseTime" {
+			parseTime = v == "true" || v == "True" || v == "1"
+			continue
+		}
 		params[k] = v
 	}
 
-	// 构建参数字符串
-	paramStr := ""
-	for k, v := range params {
-		if paramStr != "" {
-			paramStr += "&"
-		}
-		paramStr += fmt.Sprintf("%s=%s", k, v)
-	}
-
-	if paramStr != "" {
-		dsn += "?" + paramStr
-	}
-
-	return dsn
+	cfg := mysqldriver.NewConfig()
+	cfg.User = slave.User
+	cfg.Passwd = slave.Password
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(slave.Host, fmt.Sprintf("%d", slave.Port))
+	cfg.DBName = slave.Database
+	cfg.ParseTime = parseTime
+	cfg.Params = params
+	return cfg.FormatDSN()
 }
 
 // buildPostgreSQLSlaveDSN 构建 PostgreSQL 从库 DSN
 func buildPostgreSQLSlaveDSN(slave SlaveConfig) string {
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s",
-		slave.Host,
-		slave.Port,
-		slave.User,
-		slave.Password,
-		slave.Database,
-	)
+	values := make(url.Values)
+	values.Set("sslmode", "disable")
 
 	if slave.SSLMode != "" {
-		dsn += " sslmode=" + slave.SSLMode
-	} else {
-		dsn += " sslmode=disable"
+		values.Set("sslmode", slave.SSLMode)
 	}
 
 	// 添加其他参数
 	for k, v := range slave.Params {
-		dsn += fmt.Sprintf(" %s=%s", k, v)
+		values.Set(k, v)
 	}
 
-	return dsn
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     userInfo(slave.User, slave.Password),
+		Host:     net.JoinHostPort(slave.Host, fmt.Sprintf("%d", slave.Port)),
+		Path:     "/" + slave.Database,
+		RawQuery: values.Encode(),
+	}
+	return u.String()
 }
 
 // buildSQLServerSlaveDSN 构建 SQL Server 从库 DSN
 func buildSQLServerSlaveDSN(slave SlaveConfig) string {
-	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
-		slave.User,
-		slave.Password,
-		slave.Host,
-		slave.Port,
-		slave.Database,
-	)
-
-	// 添加其他参数
-	first := true
+	values := make(url.Values)
+	values.Set("database", slave.Database)
 	for k, v := range slave.Params {
-		if first {
-			dsn += "&"
-			first = false
-		} else {
-			dsn += "&"
-		}
-		dsn += fmt.Sprintf("%s=%s", k, v)
+		values.Set(k, v)
 	}
-
-	return dsn
+	u := url.URL{
+		Scheme:   "sqlserver",
+		User:     userInfo(slave.User, slave.Password),
+		Host:     net.JoinHostPort(slave.Host, fmt.Sprintf("%d", slave.Port)),
+		RawQuery: values.Encode(),
+	}
+	return u.String()
 }

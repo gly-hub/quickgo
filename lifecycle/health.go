@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -41,10 +42,10 @@ type HealthCheck interface {
 
 // HealthResult 健康检查结果
 type HealthResult struct {
-	Status  HealthStatus          `json:"status"`
-	Message string                `json:"message,omitempty"`
+	Status  HealthStatus           `json:"status"`
+	Message string                 `json:"message,omitempty"`
 	Details map[string]interface{} `json:"details,omitempty"`
-	Time    time.Time             `json:"time"`
+	Time    time.Time              `json:"time"`
 }
 
 // HealthChecker 健康检查器
@@ -107,28 +108,23 @@ func (h *HealthChecker) Check(ctx context.Context) map[string]HealthResult {
 	}
 	h.mu.RUnlock()
 
-	results := make(map[string]HealthResult)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	type checkResult struct {
+		name   string
+		result HealthResult
+	}
 
+	results := make(map[string]HealthResult, len(checks))
+	resultCh := make(chan checkResult, len(checks))
 	for name, check := range checks {
-		wg.Add(1)
 		go func(name string, check HealthCheck) {
-			defer wg.Done()
-
-			checkCtx, cancel := context.WithTimeout(ctx, h.timeout)
-			defer cancel()
-
-			result := check.Check(checkCtx)
-			result.Time = time.Now()
-
-			mu.Lock()
-			results[name] = result
-			mu.Unlock()
+			resultCh <- checkResult{name: name, result: h.runCheck(ctx, name, check)}
 		}(name, check)
 	}
 
-	wg.Wait()
+	for range checks {
+		result := <-resultCh
+		results[result.name] = result.result
+	}
 
 	// 更新缓存
 	h.mu.Lock()
@@ -138,6 +134,42 @@ func (h *HealthChecker) Check(ctx context.Context) map[string]HealthResult {
 	h.mu.Unlock()
 
 	return results
+}
+
+func (h *HealthChecker) runCheck(ctx context.Context, name string, check HealthCheck) HealthResult {
+	checkCtx, cancel := context.WithTimeout(ctx, h.timeout)
+	defer cancel()
+
+	resultCh := make(chan HealthResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- HealthResult{
+					Status:  StatusUnhealthy,
+					Message: fmt.Sprintf("health check panic: %v", r),
+					Time:    time.Now(),
+				}
+			}
+		}()
+
+		result := check.Check(checkCtx)
+		result.Time = time.Now()
+		resultCh <- result
+	}()
+
+	select {
+	case result := <-resultCh:
+		if result.Time.IsZero() {
+			result.Time = time.Now()
+		}
+		return result
+	case <-checkCtx.Done():
+		return HealthResult{
+			Status:  StatusUnhealthy,
+			Message: fmt.Sprintf("health check %s timed out: %v", name, checkCtx.Err()),
+			Time:    time.Now(),
+		}
+	}
 }
 
 // CheckOne 执行单个健康检查
@@ -150,11 +182,7 @@ func (h *HealthChecker) CheckOne(ctx context.Context, name string) (HealthResult
 		return HealthResult{}, false
 	}
 
-	checkCtx, cancel := context.WithTimeout(ctx, h.timeout)
-	defer cancel()
-
-	result := check.Check(checkCtx)
-	result.Time = time.Now()
+	result := h.runCheck(ctx, name, check)
 
 	// 更新缓存
 	h.mu.Lock()
@@ -203,8 +231,8 @@ func (h *HealthChecker) OverallStatus(ctx context.Context) HealthStatus {
 
 // Readiness 就绪检查结果
 type Readiness struct {
-	Ready   bool              `json:"ready"`
-	Checks  map[string]HealthResult `json:"checks,omitempty"`
+	Ready  bool                    `json:"ready"`
+	Checks map[string]HealthResult `json:"checks,omitempty"`
 }
 
 // IsReady 检查是否就绪
