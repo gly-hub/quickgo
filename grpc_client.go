@@ -207,7 +207,12 @@ func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (
 	m.clientPools[serviceName] = pool
 	logger.Info(ctx, "Created gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
 
-	return pool.getClient(), nil
+	client := pool.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("no usable grpc client available for service %s", serviceName)
+	}
+
+	return client, nil
 }
 
 // GetConn 获取服务连接（便捷方法）
@@ -216,6 +221,9 @@ func (m *GrpcClientManager) GetConn(ctx context.Context, serviceName string) (*r
 	client, err := m.GetClient(ctx, serviceName)
 	if err != nil {
 		return nil, err
+	}
+	if client == nil {
+		return nil, fmt.Errorf("grpc client is nil for service %s", serviceName)
 	}
 	return client.GetConn(), nil
 }

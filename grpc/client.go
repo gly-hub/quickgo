@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -221,7 +222,7 @@ func (c *Client) IsConnected() bool {
 		return false
 	}
 	state := c.conn.GetState()
-	return state.String() == "READY"
+	return state == connectivity.Ready || state == connectivity.Idle
 }
 
 // Close 关闭连接
