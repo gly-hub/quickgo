@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package user;
+
+option go_package = "github.com/team-dandelion/quickgo/example/simple/proto/gen;gen";
+
+import "google/protobuf/timestamp.proto";
+
+// 通用响应
+message CommonResp {
+  int32 code = 1;
+  string msg = 2;
+}
+
+// 用户服务
+service UserService {
+  // 获取用户信息
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  // 创建用户
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  // 用户列表
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  // 健康检查
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// 用户信息
+message User {
+  int64 id = 1;
+  string username = 2;
+  string email = 3;
+  string phone = 4;
+  int32 status = 5;  // 1: 正常, 0: 禁用
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// 获取用户请求
+message GetUserRequest {
+  int64 id = 1;
+}
+
+// 获取用户响应
+message GetUserResponse {
+  CommonResp common_resp = 1;
+  User user = 2;
+}
+
+// 创建用户请求
+message CreateUserRequest {
+  string username = 1;
+  string email = 2;
+  string phone = 3;
+}
+
+// 创建用户响应
+message CreateUserResponse {
+  CommonResp common_resp = 1;
+  User user = 2;
+}
+
+// 用户列表请求
+message ListUsersRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+}
+
+// 用户列表响应
+message ListUsersResponse {
+  CommonResp common_resp = 1;
+  repeated User users = 2;
+  int32 total = 3;
+}
+
+// 健康检查请求
+message HealthCheckRequest {}
+
+// 健康检查响应
+message HealthCheckResponse {
+  CommonResp common_resp = 1;
+  string status = 2;
+  string version = 3;
+}

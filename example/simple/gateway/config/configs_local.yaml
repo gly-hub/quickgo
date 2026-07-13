@@ -1,0 +1,34 @@
+app:
+  name: gateway
+  version: "1.0.0"
+  env: local
+
+logger:
+  enabled: true
+  level: debug
+  output: console
+  service: gateway
+  version: "1.0.0"
+
+httpServer:
+  enabled: true
+  address: "0.0.0.0"
+  port: 8080
+
+grpcClient:
+  # 静态服务发现（直连模式）
+  discovery: static
+  staticAddresses:
+    user-service: "127.0.0.1:9001"
+  timeout: "10s"
+  keepAliveTime: "30s"
+  keepAliveTimeout: "10s"
+  poolSize: 2
+  healthCheckInterval: "30s"
+  reconnectInterval: "5s"
+
+tracing:
+  enabled: false
+  serviceName: gateway
+  serviceVersion: "1.0.0"
+  environment: local

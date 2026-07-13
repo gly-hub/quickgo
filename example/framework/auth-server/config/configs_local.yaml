@@ -33,7 +33,7 @@ gorm:
         host: "127.0.0.1"
         port: 3306
         user: "root"
-        password: "starunion"
+        password: "quickgo"
         database: "go-admin"
         charset: "utf8mb4"
         timezone: "Local"
@@ -41,7 +41,7 @@ gorm:
         - host: "127.0.0.1"
           port: 3306
           user: "root"
-          password: "starunion"
+          password: "quickgo"
           database: "go-admin"
           charset: "utf8mb4"
           timezone: "Local"
