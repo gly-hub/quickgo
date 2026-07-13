@@ -1,0 +1,24 @@
+app:
+  name: user-service
+  version: "1.0.0"
+  env: local
+
+logger:
+  enabled: true
+  level: debug
+  output: console
+  service: user-service
+  version: "1.0.0"
+
+grpcServer:
+  address: "0.0.0.0"
+  port: 9001
+  serviceName: user-service
+  keepAliveTime: "30s"
+  keepAliveTimeout: "10s"
+
+tracing:
+  enabled: false
+  serviceName: user-service
+  serviceVersion: "1.0.0"
+  environment: local
