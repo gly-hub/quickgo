@@ -1,0 +1,310 @@
+# 配置参考
+
+本文档描述根包 `quickgo` 与常用子包在 YAML 中的典型字段。  
+完整示例见：
+
+- `example/simple/*/config/configs_local.yaml`
+- `example/framework/*/config/configs_local.yaml`
+
+环境变量 **`DANDELION_ENV`** 覆盖环境名；配置文件名格式：`configs_{env}.yaml`。
+
+---
+
+## app
+
+```yaml
+app:
+  name: my-service
+  version: "1.0.0"
+  env: local   # local | develop | release | production
+```
+
+对应：`quickgo.AppConfig`
+
+---
+
+## logger
+
+```yaml
+logger:
+  enabled: true
+  level: debug          # debug | info | warn | error
+  output: console       # console | file
+  file: ""              # output=file 时的路径
+  service: my-service
+  version: "1.0.0"
+```
+
+对应：`quickgo.LoggerConfig` → `logger.Config`
+
+---
+
+## grpcServer
+
+```yaml
+grpcServer:
+  serviceName: user-service
+  address: "0.0.0.0"
+  port: 9001
+  keepAliveTime: "30s"
+  keepAliveTimeout: "10s"
+  # 注册到 etcd 时需要：
+  etcd:
+    endpoints:
+      - "127.0.0.1:2379"
+    dialTimeout: "5s"
+    prefix: "/grpc/services"
+    ttl: 30
+```
+
+对应：`quickgo.GrpcServerConfig`
+
+| 字段 | 说明 |
+|------|------|
+| `serviceName` | 服务发现注册名 |
+| `address` / `port` | 监听地址 |
+| `keepAliveTime` / `keepAliveTimeout` | 字符串 duration |
+| `etcd` | 非空则向 etcd 注册 |
+
+---
+
+## grpcClient
+
+```yaml
+# 静态发现（simple 示例）
+grpcClient:
+  discovery: static
+  staticAddresses:
+    user-service: "127.0.0.1:9001"
+  timeout: "10s"
+  insecure: true
+  keepAliveTime: "30s"
+  keepAliveTimeout: "10s"
+  loadBalancing: round_robin
+  poolSize: 2
+  healthCheckInterval: "30s"
+  reconnectInterval: "5s"
+
+# etcd 发现（framework gateway）
+grpcClient:
+  timeout: "10s"
+  insecure: true
+  keepAliveTime: "10s"
+  keepAliveTimeout: "3s"
+  loadBalancing: round_robin
+  etcd:
+    endpoints:
+      - "127.0.0.1:2379"
+    dialTimeout: "5s"
+    prefix: "/grpc/services"
+```
+
+对应：`quickgo.GrpcClientConfig`
+
+| 字段 | 说明 |
+|------|------|
+| `discovery` | `static` 或 etcd（配置 `etcd` 块） |
+| `staticAddresses` | `服务名 → host:port` |
+| `poolSize` | 每服务连接数，建议 2–4 |
+| `healthCheckInterval` | 空或 0 可禁用 |
+
+---
+
+## httpServer
+
+```yaml
+httpServer:
+  enabled: true
+  address: "0.0.0.0"
+  port: 8080
+  enableCORS: true
+  enableRecovery: true
+  enableLogging: true
+  enableTrace: true
+  # 显式关闭（与 enable* 同时存在时，disable 优先，见实现）
+  disableCORS: false
+  disableRecovery: false
+  disableLogging: false
+  disableTrace: false
+  cors:
+    allowOrigins: "*"
+    allowMethods: "GET,POST,PUT,DELETE,OPTIONS"
+    allowHeaders: "*"
+    allowCredentials: false
+  metricsPath: /metrics
+  disableMetricsEndpoint: false
+```
+
+对应：`quickgo.HTTPServerConfig`
+
+---
+
+## tracing
+
+推荐 **OTLP**（Jaeger all-in-one 默认开 OTLP）：
+
+```yaml
+tracing:
+  enabled: true
+  serviceName: my-service
+  serviceVersion: "1.0.0"
+  environment: local
+  samplingRate: 1.0
+  otlp:
+    enabled: true
+    endpoint: "localhost:4318"   # 或 http://localhost:4318
+    useGRPC: false
+    insecure: true
+```
+
+遗留 Jaeger agent（已 deprecated，仍可用）：
+
+```yaml
+tracing:
+  enabled: true
+  serviceName: my-service
+  samplingRate: 1.0
+  jaeger:
+    enabled: true
+    agentHost: localhost
+    agentPort: 6831
+```
+
+对应：`tracing.Config`
+
+本地 Jaeger UI：`http://localhost:16686`（`make deps-up` / `deps-up-minimal`）。
+
+---
+
+## metrics
+
+```yaml
+# 通过 Framework Option 传入 metrics.Config（也可嵌在 http/grpc 配置中）
+# 代码侧：
+#   quickgo.ConfigOptionWithMetrics(&metrics.Config{ ... })
+```
+
+`metrics.Config` 主要字段：
+
+| 字段 | 默认倾向 |
+|------|----------|
+| `Namespace` | `quickgo` |
+| `EnableHTTP` / `EnableGRPC` / `EnablePool` / `EnableResilience` | true |
+| `Disable*` | 显式关闭对应 Enable |
+| `Buckets` | Prometheus 默认桶 |
+
+---
+
+## gorm
+
+```yaml
+gorm:
+  databases:
+    - name: "go-admin"          # 代码 GetDB("go-admin")
+      master:
+        type: mysql             # mysql | postgres | sqlite | sqlserver
+        host: "127.0.0.1"
+        port: 3306
+        user: root
+        password: quickgo
+        database: go-admin
+        charset: utf8mb4
+        timezone: Local
+      slaves: []                # 可选只读副本
+      maxIdleConn: 10
+      maxOpenConn: 100
+      connMaxLifetime: "30m"
+      connMaxIdleTime: "10m"
+      enableLog: true
+      logLevel: info
+      slowThreshold: 200
+```
+
+对应：`db/gorm.GormManagerConfig`  
+Docker Compose MySQL：`root` / `quickgo`，库名 `go-admin`（见根目录 `docker-compose.yml`）。
+
+> framework 示例 YAML 中密码可能仍是历史值 `starunion`，使用 compose 时请改成 `quickgo`。
+
+---
+
+## redis
+
+```yaml
+redis:
+  databases:
+    - name: token-cache
+      host: "127.0.0.1"
+      port: 6379
+      password: ""
+      db: 0
+      poolSize: 10
+      minIdleConns: 5
+      maxConnAge: "1h"
+      poolTimeout: "4s"
+      idleTimeout: "5m"
+      dialTimeout: "5s"
+      readTimeout: "3s"
+      writeTimeout: "3s"
+```
+
+对应：`db/redis.RedisManagerConfig`
+
+---
+
+## mongodb
+
+```yaml
+mongodb:
+  databases:
+    - name: log-mongo
+      host: "127.0.0.1"
+      port: 27017
+      username: ""
+      password: ""
+      database: gateway_logs
+      maxPoolSize: 50
+      minPoolSize: 5
+```
+
+对应：`db/mongodb.MongoManagerConfig`
+
+---
+
+## 装配到 Framework
+
+配置加载后必须通过 Option **显式**挂载：
+
+```go
+app, err := quickgo.NewFramework(
+	quickgo.ConfigOptionWithApp(cfg.App),
+	quickgo.ConfigOptionWithLogger(cfg.Logger),
+	quickgo.ConfigOptionWithGrpcServer(&cfg.GrpcServer),
+	quickgo.ConfigOptionWithGrpcClient(&cfg.GrpcClient),
+	quickgo.ConfigOptionWithHTTPServer(&cfg.HTTPServer),
+	quickgo.ConfigOptionWithGorm(&cfg.Gorm),
+	quickgo.ConfigOptionWithRedis(&cfg.Redis),
+	quickgo.ConfigOptionWithMongoDB(&cfg.MongoDB),
+	quickgo.ConfigOptionWithTracing(&cfg.Tracing),
+	quickgo.ConfigOptionWithMetrics(&cfg.Metrics),
+)
+```
+
+未传入的组件不会初始化。
+
+---
+
+## 本地依赖端口（docker-compose）
+
+| 服务 | 端口 |
+|------|------|
+| etcd | 2379 |
+| Jaeger UI | 16686 |
+| OTLP HTTP / gRPC | 4318 / 4317 |
+| Redis | 6379 |
+| MySQL | 3306 |
+
+```bash
+make deps-up
+make deps-up-minimal   # 仅 etcd + jaeger
+make deps-down
+```
