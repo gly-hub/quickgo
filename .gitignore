@@ -1,5 +1,43 @@
+# IDE / editor
 .idea/
-.idea/*
-.claude
-example
+.vscode/
+*.swp
+*.swo
+*~
+
+# AI / local tooling
+.claude/
+.grok/
 .cache/
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+bin/
+**/bin/
+dist/
+coverage.out
+coverage.html
+
+# Local logs and pids (examples)
+**/*.log
+**/.*.pid
+**/.rpc.log
+**/.gateway.log
+**/.rpc.pid
+**/.gateway.pid
+
+# Backup / temp files
+*.bak
+*.tmp
+*.orig
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env secrets (never commit)
+.env
+.env.*
+!.env.example
