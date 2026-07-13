@@ -1,0 +1,82 @@
+# Local infrastructure for QuickGo examples and development.
+#
+#   make deps-up            # all services
+#   make deps-up-minimal    # etcd + jaeger only
+#   make deps-down
+#
+# Ports:
+#   etcd        2379
+#   jaeger UI   16686
+#   OTLP HTTP   4318
+#   OTLP gRPC   4317
+#   redis       6379
+#   mysql       3306  (root / quickgo)
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.13
+    container_name: quickgo-etcd
+    command:
+      - etcd
+      - --advertise-client-urls=http://0.0.0.0:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-peer-urls=http://0.0.0.0:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=default=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://0.0.0.0:2380
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: quickgo-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+      - "14268:14268"   # legacy collector HTTP
+      - "6831:6831/udp" # legacy agent
+
+  redis:
+    image: redis:7-alpine
+    container_name: quickgo-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mysql:
+    image: mysql:8.0
+    container_name: quickgo-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: quickgo
+      MYSQL_DATABASE: go-admin
+      MYSQL_USER: quickgo
+      MYSQL_PASSWORD: quickgo
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pquickgo"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - quickgo-mysql-data:/var/lib/mysql
+
+volumes:
+  quickgo-mysql-data:

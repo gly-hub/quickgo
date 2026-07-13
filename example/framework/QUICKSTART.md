@@ -16,28 +16,42 @@ go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 export PATH=$PATH:$(go env GOPATH)/bin
 ```
 
-### 2. 启动 etcd
+### 2. 启动依赖（推荐 docker compose）
+
+在仓库**根目录**：
+
+```bash
+# etcd + jaeger + redis + mysql
+make deps-up
+
+# 或只要 etcd + jaeger
+make deps-up-minimal
+```
+
+等价于 `docker compose up -d`（见根目录 `docker-compose.yml`）。
+
+| 服务 | 端口 / 账号 |
+|------|-------------|
+| etcd | 2379 |
+| Jaeger UI | http://localhost:16686 |
+| OTLP | 4318 (HTTP) / 4317 (gRPC) |
+| Redis | 6379 |
+| MySQL | 3306，root / `quickgo`，库 `go-admin` |
+
+> 请将 `auth-server/config/configs_local.yaml` 中 MySQL 密码改为与 compose 一致（`quickgo`），若仍写 `starunion` 会连库失败。
+
+### 2.1 手动 docker run（可选）
 
 ```bash
 docker run -d --name etcd \
-  -p 2379:2379 \
-  -p 2380:2380 \
+  -p 2379:2379 -p 2380:2380 \
   quay.io/coreos/etcd:v3.5.13 \
-  etcd \
-  --advertise-client-urls=http://127.0.0.1:2379 \
-  --listen-client-urls=http://0.0.0.0:2379
-```
+  etcd --advertise-client-urls=http://127.0.0.1:2379 --listen-client-urls=http://0.0.0.0:2379
 
-### 2.1 启动 Jaeger（可选，用于链路追踪）
-
-```bash
 docker run -d --name jaeger \
-  -p 6831:6831/udp \
-  -p 16686:16686 \
-  -p 14268:14268 \
-  -p 4317:4317 \
-  -p 4318:4318 \
-  jaegertracing/all-in-one:latest
+  -e COLLECTOR_OTLP_ENABLED=true \
+  -p 16686:16686 -p 4317:4317 -p 4318:4318 \
+  jaegertracing/all-in-one:1.57
 ```
 
 访问 Jaeger UI: http://localhost:16686
