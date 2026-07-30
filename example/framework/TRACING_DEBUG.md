@@ -46,7 +46,7 @@ curl -v http://localhost:4318/v1/traces
 
 ### 6. 检查采样率
 
-确保 `samplingRate` 设置为 `1.0`（采样所有请求），而不是 `0.0`。
+零值 `samplingRate` 默认采样所有请求；如需显式关闭采样，设置 `disableSampling: true`。
 
 ### 7. 检查服务是否真的发送了追踪数据
 
@@ -179,4 +179,3 @@ curl -X POST http://localhost:4318/v1/traces \
 - [ ] 发送了测试请求
 - [ ] Jaeger UI 中可以找到服务名称
 - [ ] Jaeger UI 中有 traces 数据
-

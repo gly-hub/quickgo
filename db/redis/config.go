@@ -27,10 +27,17 @@ type RedisConfig struct {
 	WriteTimeout string `json:"writeTimeout" yaml:"writeTimeout" toml:"writeTimeout"` // 写入超时时间（如：3s、5s）
 	// 是否启用 TLS
 	TLS bool `json:"tls" yaml:"tls" toml:"tls"`
+	// TLS CA、客户端证书和服务器名称（可选）
+	TLSCAFile     string `json:"tlsCAFile" yaml:"tlsCAFile" toml:"tlsCAFile"`
+	TLSCertFile   string `json:"tlsCertFile" yaml:"tlsCertFile" toml:"tlsCertFile"`
+	TLSKeyFile    string `json:"tlsKeyFile" yaml:"tlsKeyFile" toml:"tlsKeyFile"`
+	TLSServerName string `json:"tlsServerName" yaml:"tlsServerName" toml:"tlsServerName"`
 }
 
 // RedisManagerConfig Redis 管理器配置（支持多个数据库实例）
 type RedisManagerConfig struct {
 	// 数据库配置列表
 	Databases []RedisConfig `json:"databases" yaml:"databases" toml:"databases"`
+	// 允许部分 Redis 实例在初始化时不可用。默认 false，保持 fail-fast 行为。
+	AllowUnavailable bool `json:"allowUnavailable" yaml:"allowUnavailable" toml:"allowUnavailable"`
 }

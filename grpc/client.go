@@ -2,12 +2,16 @@ package grpc
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -33,14 +37,15 @@ type Client struct {
 
 // ClientConfig 客户端配置
 type ClientConfig struct {
-	Address          string              // 服务器地址，格式：host:port 或 scheme://service-name（使用服务发现时）
-	Timeout          time.Duration       // 连接超时时间
-	Insecure         bool                // 是否使用非安全连接（不加密）
-	TLS              *TLSConfig          // TLS配置（如果 Insecure=false）
-	Options          []grpc.DialOption   // 自定义 DialOption
-	KeepAlive        *KeepAliveConfig    // KeepAlive配置
-	ServiceDiscovery ServiceDiscovery    // 服务发现（可选）
-	LoadBalancing    LoadBalancingPolicy // 负载均衡策略
+	Address           string              // 服务器地址，格式：host:port 或 scheme://service-name（使用服务发现时）
+	Timeout           time.Duration       // 连接超时时间
+	Insecure          bool                // 是否使用非安全连接（不加密）
+	TLS               *TLSConfig          // TLS配置（如果 Insecure=false）
+	Options           []grpc.DialOption   // 自定义 DialOption
+	KeepAlive         *KeepAliveConfig    // KeepAlive配置
+	ReconnectInterval time.Duration       // 重连退避的基础延迟；0 使用 gRPC 默认值
+	ServiceDiscovery  ServiceDiscovery    // 服务发现（可选）
+	LoadBalancing     LoadBalancingPolicy // 负载均衡策略
 }
 
 // TLSConfig TLS配置
@@ -130,31 +135,15 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if config.Insecure {
 		options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	} else if config.TLS != nil {
-		var creds credentials.TransportCredentials
-		var err error
-
-		if config.TLS.CAFile != "" {
-			// 使用CA证书验证服务器
-			serverName := config.TLS.ServerName
-			if serverName == "" {
-				serverName = "localhost"
-			}
-			creds, err = credentials.NewClientTLSFromFile(config.TLS.CAFile, serverName)
-		} else {
-			// 使用系统默认证书
-			creds = credentials.NewTLS(nil)
-		}
-
+		creds, err := loadClientTLSCredentials(config.TLS)
 		if err != nil {
 			_ = client.Close()
-			cancel()
 			return nil, fmt.Errorf("failed to load TLS credentials: %w", err)
 		}
-
 		options = append(options, grpc.WithTransportCredentials(creds))
 	} else {
-		// 默认使用非安全连接
-		options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		_ = client.Close()
+		return nil, errors.New("TLS config is required when insecure is false")
 	}
 
 	// 添加KeepAlive配置
@@ -163,6 +152,14 @@ func NewClient(config ClientConfig) (*Client, error) {
 			Time:                config.KeepAlive.Time,
 			Timeout:             config.KeepAlive.Timeout,
 			PermitWithoutStream: config.KeepAlive.PermitWithoutStream,
+		}))
+	}
+	if config.ReconnectInterval > 0 {
+		backoffConfig := backoff.DefaultConfig
+		backoffConfig.BaseDelay = config.ReconnectInterval
+		options = append(options, grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoffConfig,
+			MinConnectTimeout: config.Timeout,
 		}))
 	}
 
@@ -203,6 +200,44 @@ func NewClient(config ClientConfig) (*Client, error) {
 	return client, nil
 }
 
+func loadClientTLSCredentials(config *TLSConfig) (credentials.TransportCredentials, error) {
+	if config == nil {
+		return nil, errors.New("TLS config is nil")
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: config.ServerName,
+	}
+	if config.CAFile != "" {
+		caPEM, err := os.ReadFile(config.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA file: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("CA file contains no valid certificates")
+		}
+		tlsConfig.RootCAs = roots
+	}
+
+	if (config.CertFile == "") != (config.KeyFile == "") {
+		return nil, errors.New("both certFile and keyFile are required for mutual TLS")
+	}
+	if config.CertFile != "" {
+		certificate, err := tls.LoadX509KeyPair(config.CertFile, config.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{certificate}
+	}
+
+	return credentials.NewTLS(tlsConfig), nil
+}
+
 // Connect 连接到gRPC服务器
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.RLock()
@@ -216,13 +251,24 @@ func (c *Client) Connect(ctx context.Context) error {
 	connectCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	// 连接服务器
+	// 创建连接并显式等待 Ready，保持 Connect 的同步语义。
 	options := append([]grpc.DialOption{}, c.options...)
-	options = append(options, grpc.WithBlock())
-	conn, err := grpc.DialContext(connectCtx, c.address, options...)
+	conn, err := grpc.NewClient(c.address, options...)
 	if err != nil {
 		logger.Error(ctx, "Failed to connect to gRPC server: address=%s, error=%v", c.address, err)
 		return fmt.Errorf("failed to connect to %s: %w", c.address, err)
+	}
+	conn.Connect()
+	for conn.GetState() != connectivity.Ready {
+		state := conn.GetState()
+		if state == connectivity.Shutdown {
+			_ = conn.Close()
+			return fmt.Errorf("failed to connect to %s: connection shut down", c.address)
+		}
+		if !conn.WaitForStateChange(connectCtx, state) {
+			_ = conn.Close()
+			return fmt.Errorf("failed to connect to %s: %w", c.address, connectCtx.Err())
+		}
 	}
 
 	c.mu.Lock()
@@ -260,6 +306,30 @@ func (c *Client) IsConnected() bool {
 	}
 	state := conn.GetState()
 	return state == connectivity.Ready
+}
+
+// IsUsable reports whether the underlying ClientConn can still be used.
+//
+// grpc.ClientConn reconnects internally when it is Idle, Connecting, or in
+// TransientFailure. Only nil and Shutdown connections should be replaced.
+func (c *Client) IsUsable() bool {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return false
+	}
+	return conn.GetState() != connectivity.Shutdown
+}
+
+// ConnectNow asks grpc-go to leave Idle state and reconnect in the background.
+func (c *Client) ConnectNow() {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn != nil {
+		conn.Connect()
+	}
 }
 
 // Close 关闭连接

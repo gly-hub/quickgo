@@ -2,9 +2,12 @@ package gorm
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"sync"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -20,9 +23,11 @@ import (
 
 // Client GORM 客户端封装
 type Client struct {
-	name   string
-	db     *gorm.DB
-	config *GormConfig
+	name      string
+	db        *gorm.DB
+	config    *GormConfig
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewClient 创建 GORM 客户端
@@ -215,19 +220,49 @@ func (c *Client) GetName() string {
 
 // Close 关闭数据库连接
 func (c *Client) Close() error {
+	c.closeOnce.Do(func() {
+		c.closeErr = c.closeConnections()
+	})
+	return c.closeErr
+}
+
+func (c *Client) closeConnections() error {
 	if c.db == nil {
 		return nil
-	}
-
-	sqlDB, err := c.db.DB()
-	if err != nil {
-		return err
 	}
 
 	ctx := context.Background()
 	logger.Info(ctx, "Closing GORM client: name=%s", c.name)
 
-	return sqlDB.Close()
+	var errs []error
+	closed := make(map[*sql.DB]struct{})
+	closePool := func(pool gorm.ConnPool) {
+		sqlDB, ok := pool.(*sql.DB)
+		if !ok || sqlDB == nil {
+			return
+		}
+		if _, exists := closed[sqlDB]; exists {
+			return
+		}
+		closed[sqlDB] = struct{}{}
+		if err := sqlDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if plugin, ok := c.db.Config.Plugins["gorm:db_resolver"].(*dbresolver.DBResolver); ok {
+		_ = plugin.Call(func(pool gorm.ConnPool) error {
+			closePool(pool)
+			return nil
+		})
+	}
+	if primary, err := c.db.DB(); err != nil {
+		errs = append(errs, err)
+	} else {
+		closePool(primary)
+	}
+
+	return errors.Join(errs...)
 }
 
 // HealthCheck 健康检查
@@ -322,7 +357,7 @@ func userInfo(user, password string) *url.Userinfo {
 // buildPostgreSQLDSN 构建 PostgreSQL DSN
 func buildPostgreSQLDSN(master MasterConfig) string {
 	values := make(url.Values)
-	values.Set("sslmode", "disable")
+	values.Set("sslmode", "require")
 
 	if master.SSLMode != "" {
 		values.Set("sslmode", master.SSLMode)
@@ -412,7 +447,7 @@ func buildMySQLSlaveDSN(slave SlaveConfig) string {
 // buildPostgreSQLSlaveDSN 构建 PostgreSQL 从库 DSN
 func buildPostgreSQLSlaveDSN(slave SlaveConfig) string {
 	values := make(url.Values)
-	values.Set("sslmode", "disable")
+	values.Set("sslmode", "require")
 
 	if slave.SSLMode != "" {
 		values.Set("sslmode", slave.SSLMode)

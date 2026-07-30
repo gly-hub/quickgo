@@ -2,7 +2,12 @@ package redis
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"net"
+	"os"
 	"time"
 
 	"github.com/team-dandelion/quickgo/logger"
@@ -137,10 +142,11 @@ func NewClient(config *RedisConfig) (*Client, error) {
 		options.WriteTimeout = 3 * time.Second // 默认值
 	}
 
-	// TLS 配置（如果需要，可以在这里添加 TLS 配置）
-	// if config.TLS {
-	//     options.TLSConfig = &tls.Config{}
-	// }
+	tlsConfig, err := buildTLSConfig(config, addr)
+	if err != nil {
+		return nil, err
+	}
+	options.TLSConfig = tlsConfig
 
 	// 创建客户端
 	client := redisClient.NewClient(options)
@@ -189,6 +195,55 @@ func (c *Client) Close() error {
 
 	logger.Info(ctx, "Redis client closed: name=%s", c.name)
 	return nil
+}
+
+func buildTLSConfig(config *RedisConfig, addr string) (*tls.Config, error) {
+	if !config.TLS {
+		if config.TLSCAFile != "" || config.TLSCertFile != "" || config.TLSKeyFile != "" || config.TLSServerName != "" {
+			return nil, errors.New("redis TLS options require tls=true")
+		}
+		return nil, nil
+	}
+
+	serverName := config.TLSServerName
+	if serverName == "" {
+		host, _, err := net.SplitHostPort(addr)
+		if err == nil {
+			serverName = host
+		}
+	}
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: serverName,
+	}
+
+	if config.TLSCAFile != "" {
+		caPEM, err := os.ReadFile(config.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read Redis TLS CA file: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("redis TLS CA file contains no valid certificates")
+		}
+		tlsConfig.RootCAs = roots
+	}
+
+	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
+		return nil, errors.New("both Redis tlsCertFile and tlsKeyFile are required for mutual TLS")
+	}
+	if config.TLSCertFile != "" {
+		certificate, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load Redis client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{certificate}
+	}
+
+	return tlsConfig, nil
 }
 
 // HealthCheck 健康检查

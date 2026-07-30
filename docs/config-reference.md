@@ -64,6 +64,7 @@ grpcServer:
 | `serviceName` | 服务发现注册名 |
 | `address` / `port` | 监听地址 |
 | `keepAliveTime` / `keepAliveTimeout` | 字符串 duration |
+| `maxConnectionIdle` / `maxConnectionAge` / `maxConnectionAgeGrace` | 连接空闲、最大年龄和优雅关闭窗口；空值表示不限制 |
 | `etcd` | 非空则向 etcd 注册 |
 
 ---
@@ -85,6 +86,18 @@ grpcClient:
   healthCheckInterval: "30s"
   reconnectInterval: "5s"
 
+# TLS（生产推荐；insecure=false 时 tls 块必需）
+grpcClient:
+  discovery: static
+  staticAddresses:
+    user-service: "user.internal:9001"
+  insecure: false
+  tls:
+    caFile: "/etc/quickgo/ca.pem"       # 可选；为空时使用系统 CA
+    certFile: "/etc/quickgo/client.pem" # 双向 TLS 可选
+    keyFile: "/etc/quickgo/client-key.pem"
+    serverName: "user.internal"
+
 # etcd 发现（framework gateway）
 grpcClient:
   timeout: "10s"
@@ -103,10 +116,12 @@ grpcClient:
 
 | 字段 | 说明 |
 |------|------|
-| `discovery` | `static` 或 etcd（配置 `etcd` 块） |
+| `discovery` | `static`、`etcd` 或空（空值直连；旧配置含 `etcd` 块时自动推断为 etcd） |
 | `staticAddresses` | `服务名 → host:port` |
 | `poolSize` | 每服务连接数，建议 2–4 |
 | `healthCheckInterval` | 空或 0 可禁用 |
+| `reconnectInterval` | gRPC 连接退避的基础延迟 |
+| `tls` | `insecure=false` 时必需；支持系统 CA、自定义 CA 和双向 TLS |
 
 ---
 
@@ -132,6 +147,8 @@ httpServer:
     allowHeaders: "*"
     allowCredentials: false
   metricsPath: /metrics
+  enableMetricsEndpoint: true  # 默认 false，必须显式启用
+  metricsBearerToken: "replace-me" # 可选，建议从密钥管理系统注入
   disableMetricsEndpoint: false
 ```
 
@@ -149,7 +166,8 @@ tracing:
   serviceName: my-service
   serviceVersion: "1.0.0"
   environment: local
-  samplingRate: 1.0
+  samplingRate: 1.0       # 零值同样使用默认 1.0
+  disableSampling: false  # 显式关闭采样
   otlp:
     enabled: true
     endpoint: "localhost:4318"   # 或 http://localhost:4318
@@ -157,18 +175,7 @@ tracing:
     insecure: true
 ```
 
-遗留 Jaeger agent（已 deprecated，仍可用）：
-
-```yaml
-tracing:
-  enabled: true
-  serviceName: my-service
-  samplingRate: 1.0
-  jaeger:
-    enabled: true
-    agentHost: localhost
-    agentPort: 6831
-```
+旧 Jaeger exporter 已移除。Jaeger 通过 OTLP `4317`（gRPC）或 `4318`（HTTP）接收 trace。
 
 对应：`tracing.Config`
 
@@ -199,6 +206,7 @@ tracing:
 
 ```yaml
 gorm:
+  allowUnavailable: false   # 默认 false；true 时不可用实例不阻断启动，但健康检查会失败
   databases:
     - name: "go-admin"          # 代码 GetDB("go-admin")
       master:
@@ -216,12 +224,15 @@ gorm:
       connMaxLifetime: "30m"
       connMaxIdleTime: "10m"
       enableLog: true
+      logParameters: false       # 默认脱敏；生产不要开启参数记录
       logLevel: info
       slowThreshold: 200
 ```
 
 对应：`db/gorm.GormManagerConfig`  
 Docker Compose MySQL：`root` / `quickgo`，库名 `go-admin`（见根目录 `docker-compose.yml`）。
+
+PostgreSQL 自动构建 DSN 时默认 `sslmode=require`；仅在可信本地环境显式配置 `sslMode: disable`。
 
 > framework 示例 YAML 中密码可能仍是历史值 `starunion`，使用 compose 时请改成 `quickgo`。
 
@@ -231,6 +242,7 @@ Docker Compose MySQL：`root` / `quickgo`，库名 `go-admin`（见根目录 `do
 
 ```yaml
 redis:
+  allowUnavailable: false   # 默认 false；true 时不可用实例不阻断启动，但健康检查会失败
   databases:
     - name: token-cache
       host: "127.0.0.1"
@@ -245,6 +257,11 @@ redis:
       dialTimeout: "5s"
       readTimeout: "3s"
       writeTimeout: "3s"
+      tls: true
+      tlsCAFile: "/etc/quickgo/redis-ca.pem"
+      tlsCertFile: "/etc/quickgo/redis-client.pem" # 双向 TLS 可选
+      tlsKeyFile: "/etc/quickgo/redis-client-key.pem"
+      tlsServerName: "redis.internal"
 ```
 
 对应：`db/redis.RedisManagerConfig`
@@ -255,6 +272,7 @@ redis:
 
 ```yaml
 mongodb:
+  allowUnavailable: false   # 默认 false；true 时不可用实例不阻断启动，但健康检查会失败
   databases:
     - name: log-mongo
       host: "127.0.0.1"

@@ -1,11 +1,14 @@
 package gorm
 
 import (
+	"database/sql"
 	"net/url"
 	"path/filepath"
 	"testing"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/plugin/dbresolver"
 )
 
 func TestBuildMySQLDSNUsesDriverEscaping(t *testing.T) {
@@ -151,5 +154,46 @@ func TestNewClientWithReadReplicaKeepsSourceOpen(t *testing.T) {
 
 	if err := client.GetDB().Exec("CREATE TABLE messages (id integer primary key, body text)").Error; err != nil {
 		t.Fatalf("expected source connection to remain usable after replica setup, got %v", err)
+	}
+}
+
+func TestClientCloseClosesSourceAndReplicaPools(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewClient(&GormConfig{
+		Name: "test-close",
+		Master: MasterConfig{
+			Type:     DatabaseTypeSQLite,
+			Database: filepath.Join(dir, "master.db"),
+		},
+		Slaves: []SlaveConfig{{Database: filepath.Join(dir, "replica.db")}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	plugin, ok := client.db.Config.Plugins["gorm:db_resolver"].(*dbresolver.DBResolver)
+	if !ok {
+		t.Fatal("dbresolver plugin was not registered")
+	}
+	var pools []*sql.DB
+	if err := plugin.Call(func(pool gorm.ConnPool) error {
+		if sqlDB, ok := pool.(*sql.DB); ok {
+			pools = append(pools, sqlDB)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("collect pools: %v", err)
+	}
+	if len(pools) < 2 {
+		t.Fatalf("expected source and replica pools, got %d", len(pools))
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	for _, pool := range pools {
+		if err := pool.Ping(); err == nil {
+			t.Fatal("expected closed source/replica pool to reject Ping")
+		}
 	}
 }

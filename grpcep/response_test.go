@@ -15,6 +15,7 @@ type TestResponseWithCommonResp struct {
 
 // 模拟一个带 common_resp 字段的响应结构（使用 common_resp 字段名）
 type TestResponseWithCommonRespV2 struct {
+	//lint:ignore U1000 accessed through reflection by response helpers
 	common_resp *CommonResp //nolint:stylecheck,revive
 	Data        string
 }

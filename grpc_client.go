@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/team-dandelion/quickgo/grpc"
 	"github.com/team-dandelion/quickgo/logger"
@@ -25,6 +26,8 @@ type GrpcClientConfig struct {
 	Timeout string `json:"timeout" yaml:"timeout" toml:"timeout"`
 	// 是否使用非安全连接（不加密）
 	Insecure bool `json:"insecure" yaml:"insecure" toml:"insecure"`
+	// TLS 配置。Insecure=false 时必须提供，支持系统 CA、自定义 CA 和双向 TLS。
+	TLS *GrpcClientTLSConfig `json:"tls" yaml:"tls" toml:"tls"`
 	// 心跳时间 示例：10s
 	KeepAliveTime string `json:"keepAliveTime" yaml:"keepAliveTime" toml:"keepAliveTime"`
 	// 心跳超时时间 示例：3s
@@ -43,6 +46,14 @@ type GrpcClientConfig struct {
 	Etcd *EtcdConfig `json:"etcd" yaml:"etcd" toml:"etcd"`
 }
 
+// GrpcClientTLSConfig gRPC 客户端 TLS 配置。
+type GrpcClientTLSConfig struct {
+	CertFile   string `json:"certFile" yaml:"certFile" toml:"certFile"`
+	KeyFile    string `json:"keyFile" yaml:"keyFile" toml:"keyFile"`
+	CAFile     string `json:"caFile" yaml:"caFile" toml:"caFile"`
+	ServerName string `json:"serverName" yaml:"serverName" toml:"serverName"`
+}
+
 // GrpcClientManager gRPC 客户端管理器
 // 用于管理多个 gRPC 服务客户端，适合网关场景
 type GrpcClientManager struct {
@@ -56,16 +67,16 @@ type GrpcClientManager struct {
 	healthCheckCtx      context.Context
 	healthCheckCancel   context.CancelFunc
 	healthCheckRunning  bool
+	healthCheckWG       sync.WaitGroup
 }
 
 // clientPool 连接池
 type clientPool struct {
-	serviceName  string         // 服务名称
-	clients      []*grpc.Client // 连接池中的客户端
-	index        uint64         // 轮询索引（使用原子操作）
-	mu           sync.RWMutex
-	unhealthy    []int        // 不健康的连接索引
-	reconnecting map[int]bool // 正在重连的连接索引
+	serviceName string         // 服务名称
+	clients     []*grpc.Client // 连接池中的客户端
+	index       uint64         // 轮询索引（使用原子操作）
+	mu          sync.RWMutex
+	unhealthy   []int // 不健康的连接索引
 }
 
 // NewGrpcClientManager 创建 gRPC 客户端管理器
@@ -75,6 +86,9 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 		return nil, errors.New("config is nil")
 	}
 	config = cloneGrpcClientConfig(config)
+	if err := normalizeGrpcClientDiscovery(config); err != nil {
+		return nil, err
+	}
 
 	// 设置默认连接池大小
 	if config.PoolSize <= 0 {
@@ -118,7 +132,7 @@ func NewGrpcClientManager(config *GrpcClientConfig) (*GrpcClientManager, error) 
 	}
 
 	// 如果配置了 etcd，创建共享的 resolver
-	if config.Etcd != nil {
+	if config.Discovery == grpc.EtcdScheme {
 		dialTimeout, err := parseDurationOrDefault(config.Etcd.DialTimeout, defaultEtcdDialTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse etcd dial timeout: %w", err)
@@ -182,7 +196,7 @@ func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (
 
 	if exists && pool != nil {
 		client := pool.getClient()
-		if client != nil && client.IsConnected() {
+		if client != nil && client.IsUsable() {
 			return client, nil
 		}
 	}
@@ -200,7 +214,7 @@ func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (
 	defer m.mu.Unlock()
 	if pool, exists := m.clientPools[serviceName]; exists && pool != nil {
 		client := pool.getClient()
-		if client != nil && client.IsConnected() {
+		if client != nil && client.IsUsable() {
 			_ = newPool.close()
 			return client, nil
 		}
@@ -272,7 +286,7 @@ func (m *GrpcClientManager) createClient(serviceName string) (*grpc.Client, erro
 	// 确定连接地址
 	// 如果是静态模式，从 StaticAddresses 中获取地址
 	address := serviceName
-	if config.Discovery == "static" {
+	if config.Discovery == grpc.StaticScheme {
 		if config.StaticAddresses == nil {
 			return nil, fmt.Errorf("static address map is required for service %s", serviceName)
 		}
@@ -286,9 +300,11 @@ func (m *GrpcClientManager) createClient(serviceName string) (*grpc.Client, erro
 
 	// 构建客户端配置
 	clientConfig := grpc.ClientConfig{
-		Address:  address, // 使用解析后的地址
-		Timeout:  timeout,
-		Insecure: config.Insecure,
+		Address:           address, // 使用解析后的地址
+		Timeout:           timeout,
+		Insecure:          config.Insecure,
+		TLS:               clientTLSConfig(config.TLS),
+		ReconnectInterval: m.reconnectInterval,
 	}
 
 	// 设置 KeepAlive 配置
@@ -305,13 +321,13 @@ func (m *GrpcClientManager) createClient(serviceName string) (*grpc.Client, erro
 		clientConfig.LoadBalancing = grpc.LoadBalancingPolicy(config.LoadBalancing)
 	} else {
 		// 如果使用服务发现，默认使用轮询策略
-		if config.Etcd != nil {
+		if config.Discovery == grpc.EtcdScheme {
 			clientConfig.LoadBalancing = grpc.PolicyRoundRobin
 		}
 	}
 
 	// 如果配置了 etcd，使用共享的 resolver
-	if config.Etcd != nil && m.etcdResolver != nil {
+	if config.Discovery == grpc.EtcdScheme && m.etcdResolver != nil {
 		clientConfig.ServiceDiscovery = m.etcdResolver
 	}
 
@@ -332,10 +348,9 @@ func (m *GrpcClientManager) createClientPool(ctx context.Context, serviceName st
 	}
 
 	pool := &clientPool{
-		serviceName:  serviceName,
-		clients:      make([]*grpc.Client, 0, poolSize),
-		unhealthy:    make([]int, 0),
-		reconnecting: make(map[int]bool),
+		serviceName: serviceName,
+		clients:     make([]*grpc.Client, 0, poolSize),
+		unhealthy:   make([]int, 0),
 	}
 
 	for i := 0; i < poolSize; i++ {
@@ -376,7 +391,7 @@ func (p *clientPool) getClient() *grpc.Client {
 	for offset := 0; offset < len(p.clients); offset++ {
 		idx := int((start + uint64(offset)) % uint64(len(p.clients)))
 		client := p.clients[idx]
-		if client != nil && client.IsConnected() {
+		if client != nil && client.IsUsable() {
 			return client
 		}
 	}
@@ -399,24 +414,11 @@ func (p *clientPool) close() error {
 	}
 	p.clients = nil
 	p.unhealthy = nil
-	p.reconnecting = make(map[int]bool)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to close some clients: %w", errors.Join(errs...))
 	}
 	return nil
-}
-
-func (p *clientPool) finishReconnect(idx int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.finishReconnectLocked(idx)
-}
-
-func (p *clientPool) finishReconnectLocked(idx int) {
-	if p.reconnecting != nil {
-		delete(p.reconnecting, idx)
-	}
 }
 
 // ConnectAll 连接所有已注册的客户端
@@ -564,7 +566,7 @@ func (m *GrpcClientManager) IsConnected(serviceName string) bool {
 }
 
 // StartHealthCheck 启动后台健康检查
-// 定期检查所有连接池中的连接状态，自动重连不健康的连接
+// 定期检查所有连接池中的连接状态；gRPC ClientConn 自身负责断线重连。
 func (m *GrpcClientManager) StartHealthCheck() {
 	if m.healthCheckInterval <= 0 {
 		logger.Info(context.Background(), "Health check disabled (interval <= 0)")
@@ -577,38 +579,45 @@ func (m *GrpcClientManager) StartHealthCheck() {
 		return
 	}
 	m.healthCheckRunning = true
-	m.healthCheckCtx, m.healthCheckCancel = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	m.healthCheckCtx, m.healthCheckCancel = ctx, cancel
+	m.healthCheckWG.Add(1)
 	m.mu.Unlock()
 
 	logger.Info(context.Background(), "Starting gRPC client health check: interval=%v", m.healthCheckInterval)
 
-	go m.healthCheckLoop()
+	go m.healthCheckLoop(ctx)
 }
 
 // StopHealthCheck 停止后台健康检查
 func (m *GrpcClientManager) StopHealthCheck() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if !m.healthCheckRunning {
+		m.mu.Unlock()
 		return
 	}
-
-	if m.healthCheckCancel != nil {
-		m.healthCheckCancel()
-	}
+	cancel := m.healthCheckCancel
 	m.healthCheckRunning = false
+	m.healthCheckCancel = nil
+	m.healthCheckCtx = nil
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	m.healthCheckWG.Wait()
 	logger.Info(context.Background(), "Stopped gRPC client health check")
 }
 
 // healthCheckLoop 健康检查循环
-func (m *GrpcClientManager) healthCheckLoop() {
+func (m *GrpcClientManager) healthCheckLoop(ctx context.Context) {
+	defer m.healthCheckWG.Done()
 	ticker := time.NewTicker(m.healthCheckInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-m.healthCheckCtx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			m.performHealthCheck()
@@ -643,98 +652,19 @@ func (m *GrpcClientManager) checkPoolHealth(serviceName string, pool *clientPool
 			continue
 		}
 
-		// 检查连接状态
-		if !client.IsConnected() {
-			logger.Warn(context.Background(), "Unhealthy connection detected: service=%s, index=%d", serviceName, i)
+		if !client.IsUsable() {
+			logger.Warn(context.Background(), "Unusable gRPC connection detected: service=%s, index=%d", serviceName, i)
 			unhealthyIndices = append(unhealthyIndices, i)
+			continue
+		}
+
+		if !client.IsConnected() {
+			logger.Warn(context.Background(), "gRPC connection is not ready yet: service=%s, index=%d", serviceName, i)
+			client.ConnectNow()
 		}
 	}
 
 	pool.unhealthy = unhealthyIndices
-
-	reconnectIndices := make([]int, 0, len(unhealthyIndices))
-	for _, idx := range unhealthyIndices {
-		if pool.reconnecting == nil {
-			pool.reconnecting = make(map[int]bool)
-		}
-		if pool.reconnecting[idx] {
-			continue
-		}
-		pool.reconnecting[idx] = true
-		reconnectIndices = append(reconnectIndices, idx)
-	}
-
-	// 如果有不健康的连接，尝试重连
-	if len(reconnectIndices) > 0 {
-		go m.reconnectUnhealthyClients(serviceName, pool, reconnectIndices)
-	}
-}
-
-// reconnectUnhealthyClients 重连不健康的客户端
-func (m *GrpcClientManager) reconnectUnhealthyClients(serviceName string, pool *clientPool, indices []int) {
-	for _, idx := range indices {
-		select {
-		case <-m.healthCheckCtx.Done():
-			return
-		default:
-		}
-
-		pool.mu.Lock()
-		if idx >= len(pool.clients) {
-			pool.finishReconnectLocked(idx)
-			pool.mu.Unlock()
-			continue
-		}
-
-		oldClient := pool.clients[idx]
-		pool.mu.Unlock()
-
-		// 关闭旧连接
-		if oldClient != nil {
-			oldClient.Close()
-		}
-
-		// 创建新客户端
-		newClient, err := m.createClient(serviceName)
-		if err != nil {
-			logger.Error(context.Background(), "Failed to create new client for reconnection: service=%s, index=%d, error=%v", serviceName, idx, err)
-			pool.finishReconnect(idx)
-			time.Sleep(m.reconnectInterval)
-			continue
-		}
-
-		// 连接
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := newClient.Connect(ctx); err != nil {
-			cancel()
-			logger.Error(context.Background(), "Failed to reconnect client: service=%s, index=%d, error=%v", serviceName, idx, err)
-			newClient.Close()
-			pool.finishReconnect(idx)
-			time.Sleep(m.reconnectInterval)
-			continue
-		}
-		cancel()
-
-		// 替换客户端
-		pool.mu.Lock()
-		if idx < len(pool.clients) {
-			pool.clients[idx] = newClient
-			// 从不健康列表中移除
-			for i, unhealthyIdx := range pool.unhealthy {
-				if unhealthyIdx == idx {
-					pool.unhealthy = append(pool.unhealthy[:i], pool.unhealthy[i+1:]...)
-					break
-				}
-			}
-			pool.finishReconnectLocked(idx)
-		} else {
-			newClient.Close()
-			pool.finishReconnectLocked(idx)
-		}
-		pool.mu.Unlock()
-
-		logger.Info(context.Background(), "Reconnected client successfully: service=%s, index=%d", serviceName, idx)
-	}
 }
 
 // GetPoolStatus 获取连接池状态信息
@@ -795,6 +725,9 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 		return nil, errors.New("config is nil")
 	}
 	config = cloneGrpcClientConfig(config)
+	if err := normalizeGrpcClientDiscovery(config); err != nil {
+		return nil, err
+	}
 
 	// 解析超时时间
 	var timeout time.Duration
@@ -829,7 +762,7 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 
 	// 构建客户端配置
 	address := serviceName
-	if config.Discovery == "static" {
+	if config.Discovery == grpc.StaticScheme {
 		if config.StaticAddresses == nil {
 			return nil, fmt.Errorf("static address map is required for service %s", serviceName)
 		}
@@ -845,6 +778,7 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 		Address:  address,
 		Timeout:  timeout,
 		Insecure: config.Insecure,
+		TLS:      clientTLSConfig(config.TLS),
 	}
 
 	// 设置 KeepAlive 配置
@@ -855,20 +789,28 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 			PermitWithoutStream: config.PermitWithoutStream,
 		}
 	}
+	if config.ReconnectInterval != "" {
+		reconnectInterval, err := time.ParseDuration(config.ReconnectInterval)
+		if err != nil {
+			logger.Error(context.Background(), "Failed to parse GrpcClientConfig.ReconnectInterval: %v", err)
+			return nil, err
+		}
+		clientConfig.ReconnectInterval = reconnectInterval
+	}
 
 	// 设置负载均衡策略
 	if config.LoadBalancing != "" {
 		clientConfig.LoadBalancing = grpc.LoadBalancingPolicy(config.LoadBalancing)
 	} else {
 		// 如果使用服务发现，默认使用轮询策略
-		if config.Etcd != nil {
+		if config.Discovery == grpc.EtcdScheme {
 			clientConfig.LoadBalancing = grpc.PolicyRoundRobin
 		}
 	}
 
 	// 如果配置了 etcd，使用 etcd 服务发现
 	var etcdResolver *grpc.EtcdResolver
-	if config.Etcd != nil {
+	if config.Discovery == grpc.EtcdScheme {
 		dialTimeout, err := parseDurationOrDefault(config.Etcd.DialTimeout, defaultEtcdDialTimeout)
 		if err != nil {
 			logger.Error(context.Background(), "Failed to parse GrpcClientConfig.Etcd.DialTimeout: %v", err)
@@ -934,6 +876,10 @@ func cloneGrpcClientConfig(config *GrpcClientConfig) *GrpcClientConfig {
 		return nil
 	}
 	cloned := *config
+	if config.TLS != nil {
+		tlsConfig := *config.TLS
+		cloned.TLS = &tlsConfig
+	}
 	if config.StaticAddresses != nil {
 		cloned.StaticAddresses = make(map[string]string, len(config.StaticAddresses))
 		for service, address := range config.StaticAddresses {
@@ -946,6 +892,48 @@ func cloneGrpcClientConfig(config *GrpcClientConfig) *GrpcClientConfig {
 		cloned.Etcd = &etcd
 	}
 	return &cloned
+}
+
+func normalizeGrpcClientDiscovery(config *GrpcClientConfig) error {
+	discovery := strings.ToLower(strings.TrimSpace(config.Discovery))
+	if discovery == "" && config.Etcd != nil {
+		// Preserve the pre-discovery-field behavior for existing etcd clients.
+		discovery = grpc.EtcdScheme
+	}
+
+	switch discovery {
+	case "", grpc.StaticScheme:
+		if discovery == grpc.StaticScheme && config.Etcd != nil {
+			return errors.New("grpc client etcd config must not be set when discovery is static")
+		}
+	case grpc.EtcdScheme:
+		if config.Etcd == nil {
+			return errors.New("grpc client etcd config is required when discovery is etcd")
+		}
+		if len(config.Etcd.Endpoints) == 0 {
+			return errors.New("grpc client etcd endpoints are required when discovery is etcd")
+		}
+		if config.Etcd.TTL < 0 {
+			return fmt.Errorf("grpc client etcd ttl must be non-negative: %d", config.Etcd.TTL)
+		}
+	default:
+		return fmt.Errorf("unsupported grpc client discovery: %s", config.Discovery)
+	}
+
+	config.Discovery = discovery
+	return nil
+}
+
+func clientTLSConfig(config *GrpcClientTLSConfig) *grpc.TLSConfig {
+	if config == nil {
+		return nil
+	}
+	return &grpc.TLSConfig{
+		CertFile:   config.CertFile,
+		KeyFile:    config.KeyFile,
+		CAFile:     config.CAFile,
+		ServerName: config.ServerName,
+	}
 }
 
 // Connect 连接到 gRPC 服务器

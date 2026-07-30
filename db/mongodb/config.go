@@ -23,7 +23,7 @@ type MongoConfig struct {
 	MinPoolSize     uint64 `json:"minPoolSize" yaml:"minPoolSize" toml:"minPoolSize"`             // 最小连接池大小
 	MaxConnIdleTime string `json:"maxConnIdleTime" yaml:"maxConnIdleTime" toml:"maxConnIdleTime"` // 连接最大空闲时间（如：30m、1h）
 	ConnectTimeout  string `json:"connectTimeout" yaml:"connectTimeout" toml:"connectTimeout"`    // 连接超时时间（如：10s、30s）
-	SocketTimeout   string `json:"socketTimeout" yaml:"socketTimeout" toml:"socketTimeout"`       // Socket 超时时间（如：30s、1m）
+	SocketTimeout   string `json:"socketTimeout" yaml:"socketTimeout" toml:"socketTimeout"`       // 操作超时时间（兼容旧字段名，如：30s、1m）
 	// 其他选项
 	Options map[string]string `json:"options" yaml:"options" toml:"options"`
 }
@@ -32,4 +32,6 @@ type MongoConfig struct {
 type MongoManagerConfig struct {
 	// 数据库配置列表
 	Databases []MongoConfig `json:"databases" yaml:"databases" toml:"databases"`
+	// 允许部分 MongoDB 实例在初始化时不可用。默认 false，保持 fail-fast 行为。
+	AllowUnavailable bool `json:"allowUnavailable" yaml:"allowUnavailable" toml:"allowUnavailable"`
 }
