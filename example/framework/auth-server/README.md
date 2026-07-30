@@ -21,7 +21,6 @@ auth-server/
 ├── config/
 │   └── configs_local.yaml   # 配置文件
 ├── Makefile                 # 构建脚本
-├── go.mod                   # Go 模块定义
 └── README.md                # 本文件
 ```
 
@@ -120,4 +119,3 @@ rpc GetUserInfo (GetUserInfoRequest) returns (GetUserInfoResponse);
 ```bash
 make clean
 ```
-
