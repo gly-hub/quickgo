@@ -17,7 +17,6 @@ gateway/
 ├── config/
 │   └── configs_local.yaml   # 配置文件
 ├── Makefile                 # 构建脚本
-├── go.mod                   # Go 模块定义
 └── README.md                # 本文件
 ```
 
@@ -160,4 +159,3 @@ curl -X GET http://localhost:8080/api/v1/auth/user/1 \
 ```bash
 make clean
 ```
-
