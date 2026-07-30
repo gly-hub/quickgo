@@ -155,6 +155,28 @@ func (c *resolverTestClientConn) ReportError(err error) {
 	c.errors = append(c.errors, err)
 }
 
+type blockingResolverClientConn struct {
+	resolver.ClientConn
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	updates int
+}
+
+func (c *blockingResolverClientConn) UpdateState(resolver.State) error {
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
+	<-c.release
+	c.mu.Lock()
+	c.updates++
+	c.mu.Unlock()
+	return nil
+}
+
+func (*blockingResolverClientConn) ReportError(error) {}
+
 type blockingWatchDiscovery struct {
 	watchStarted chan struct{}
 }
@@ -205,6 +227,64 @@ func TestServiceResolverCloseCancelsWatch(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("resolver start did not stop after Close")
+	}
+}
+
+func TestServiceResolverCloseWaitsForStateUpdate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cc := &blockingResolverClientConn{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	r := &serviceResolver{
+		cc:          cc,
+		ctx:         ctx,
+		cancel:      cancel,
+		serviceName: "orders",
+	}
+
+	updateDone := make(chan struct{})
+	go func() {
+		defer close(updateDone)
+		r.updateState([]string{"127.0.0.1:9001"})
+	}()
+
+	select {
+	case <-cc.started:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not start state update")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		r.Close()
+	}()
+
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned before the state update completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(cc.release)
+	select {
+	case <-updateDone:
+	case <-time.After(time.Second):
+		t.Fatal("state update did not complete")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after the state update")
+	}
+
+	r.updateState([]string{"127.0.0.1:9002"})
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if cc.updates != 1 {
+		t.Fatalf("expected one ClientConn update, got %d", cc.updates)
 	}
 }
 

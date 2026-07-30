@@ -166,6 +166,7 @@ type serviceResolver struct {
 	cancel      context.CancelFunc
 	serviceName string // 缓存解析后的服务名
 	stateMu     sync.Mutex
+	closed      bool
 	closeOnce   sync.Once
 	retryDelay  time.Duration
 }
@@ -262,7 +263,7 @@ func (r *serviceResolver) start() {
 func (r *serviceResolver) updateState(addresses []string) {
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
-	if r.ctx == nil || r.ctx.Err() != nil {
+	if r.closed || r.ctx == nil || r.ctx.Err() != nil {
 		return
 	}
 
@@ -314,13 +315,16 @@ func (r *serviceResolver) ResolveNow(resolver.ResolveNowOptions) {
 // Close 关闭 resolver
 func (r *serviceResolver) Close() {
 	r.closeOnce.Do(func() {
+		// Acquiring stateMu waits for an in-flight ClientConn update. Marking the
+		// resolver closed while holding it prevents callbacks from updating the
+		// ClientConn after Close returns.
+		r.stateMu.Lock()
+		r.closed = true
+		r.stateMu.Unlock()
+
 		if r.cancel != nil {
 			r.cancel()
 		}
-		// Wait for an in-flight state update so Close does not return while a
-		// callback can still update the underlying ClientConn.
-		r.stateMu.Lock()
-		r.stateMu.Unlock()
 	})
 }
 
