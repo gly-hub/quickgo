@@ -7,13 +7,15 @@ import (
 	"sync"
 
 	"github.com/team-dandelion/quickgo/logger"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 // Manager MongoDB 多客户端管理器
 type Manager struct {
-	clients map[string]*Client
-	mu      sync.RWMutex
+	clients     map[string]*Client
+	unavailable map[string]error
+	mu          sync.RWMutex
+	closed      bool
 }
 
 // NewManager 创建 MongoDB 管理器
@@ -23,7 +25,8 @@ func NewManager(config *MongoManagerConfig) (*Manager, error) {
 	}
 
 	manager := &Manager{
-		clients: make(map[string]*Client),
+		clients:     make(map[string]*Client),
+		unavailable: make(map[string]error),
 	}
 
 	ctx := context.Background()
@@ -41,12 +44,20 @@ func NewManager(config *MongoManagerConfig) (*Manager, error) {
 			_ = manager.Close()
 			return nil, fmt.Errorf("database[%d] duplicate name: %s", i, dbConfig.Name)
 		}
+		if _, exists := manager.unavailable[dbConfig.Name]; exists {
+			_ = manager.Close()
+			return nil, fmt.Errorf("database[%d] duplicate name: %s", i, dbConfig.Name)
+		}
 
 		logger.Info(ctx, "Connecting to MongoDB: name=%s", dbConfig.Name)
 
 		client, err := NewClient(dbConfig)
 		if err != nil {
-			// 连接失败，返回错误，阻止服务启动
+			if config.AllowUnavailable {
+				manager.unavailable[dbConfig.Name] = err
+				logger.Warn(ctx, "MongoDB client unavailable during initialization: name=%s, error=%v", dbConfig.Name, err)
+				continue
+			}
 			_ = manager.Close()
 			return nil, fmt.Errorf("failed to connect to MongoDB %s (service cannot start without MongoDB): %w", dbConfig.Name, err)
 		}
@@ -55,11 +66,11 @@ func NewManager(config *MongoManagerConfig) (*Manager, error) {
 		logger.Info(ctx, "MongoDB client connected successfully: name=%s", dbConfig.Name)
 	}
 
-	if len(manager.clients) == 0 {
+	if len(manager.clients) == 0 && len(manager.unavailable) == 0 {
 		return nil, fmt.Errorf("no MongoDB databases configured or all MongoDB connections failed")
 	}
 
-	logger.Info(ctx, "MongoDB Manager initialized successfully: total_clients=%d", len(manager.clients))
+	logger.Info(ctx, "MongoDB Manager initialized: available_clients=%d, unavailable_clients=%d", len(manager.clients), len(manager.unavailable))
 
 	return manager, nil
 }
@@ -71,6 +82,9 @@ func (m *Manager) GetClient(name string) (*Client, error) {
 
 	client, exists := m.clients[name]
 	if !exists {
+		if err, unavailable := m.unavailable[name]; unavailable {
+			return nil, fmt.Errorf("mongodb client unavailable: name=%s: %w", name, err)
+		}
 		return nil, fmt.Errorf("mongodb client not found: name=%s", name)
 	}
 
@@ -97,6 +111,10 @@ func (m *Manager) RegisterClient(config *MongoConfig) error {
 	}
 
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errors.New("mongodb manager is closed")
+	}
 	if _, exists := m.clients[config.Name]; exists {
 		m.mu.Unlock()
 		return fmt.Errorf("mongodb client already exists: name=%s", config.Name)
@@ -113,11 +131,16 @@ func (m *Manager) RegisterClient(config *MongoConfig) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		_ = client.Close()
+		return errors.New("mongodb manager was closed while registering client")
+	}
 	if _, exists := m.clients[config.Name]; exists {
 		_ = client.Close()
 		return fmt.Errorf("mongodb client already exists: name=%s", config.Name)
 	}
 	m.clients[config.Name] = client
+	delete(m.unavailable, config.Name)
 	logger.Info(ctx, "MongoDB client registered successfully: name=%s", config.Name)
 
 	return nil
@@ -139,13 +162,28 @@ func (m *Manager) ListClients() []string {
 // HealthCheck 健康检查（检查所有客户端）
 func (m *Manager) HealthCheck(ctx context.Context) error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	if m.closed {
+		m.mu.RUnlock()
+		return errors.New("mongodb manager is closed")
+	}
+	clients := make(map[string]*Client, len(m.clients))
+	for name, client := range m.clients {
+		clients[name] = client
+	}
+	unavailable := make(map[string]error, len(m.unavailable))
+	for name, err := range m.unavailable {
+		unavailable[name] = err
+	}
+	m.mu.RUnlock()
 
 	var errs []error
-	for name, client := range m.clients {
+	for name, client := range clients {
 		if err := client.HealthCheck(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("database %s: %w", name, err))
 		}
+	}
+	for name, err := range unavailable {
+		errs = append(errs, fmt.Errorf("database %s unavailable: %w", name, err))
 	}
 
 	if len(errs) > 0 {
@@ -158,13 +196,21 @@ func (m *Manager) HealthCheck(ctx context.Context) error {
 // Close 关闭所有数据库连接
 func (m *Manager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	clients := m.clients
+	m.clients = make(map[string]*Client)
+	m.unavailable = make(map[string]error)
+	m.mu.Unlock()
 
 	ctx := context.Background()
-	logger.Info(ctx, "Closing MongoDB Manager: total_clients=%d", len(m.clients))
+	logger.Info(ctx, "Closing MongoDB Manager: total_clients=%d", len(clients))
 
 	var errs []error
-	for name, client := range m.clients {
+	for name, client := range clients {
 		if err := client.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close client %s: %w", name, err))
 			logger.Error(ctx, "Failed to close MongoDB client: name=%s, error=%v", name, err)
@@ -172,8 +218,6 @@ func (m *Manager) Close() error {
 			logger.Info(ctx, "MongoDB client closed: name=%s", name)
 		}
 	}
-
-	m.clients = make(map[string]*Client)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to close some clients: %w", errors.Join(errs...))

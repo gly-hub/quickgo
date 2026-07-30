@@ -3,9 +3,31 @@ package quickgo
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/team-dandelion/quickgo/metrics"
 )
+
+func TestGrpcServerKeepaliveParametersApplyConnectionLifetimeLimits(t *testing.T) {
+	params, err := grpcServerKeepaliveParameters(&GrpcServerConfig{
+		MaxConnectionIdle:     "1m",
+		MaxConnectionAge:      "2m",
+		MaxConnectionAgeGrace: "3m",
+	})
+	if err != nil {
+		t.Fatalf("grpcServerKeepaliveParameters failed: %v", err)
+	}
+	if params.MaxConnectionIdle != time.Minute || params.MaxConnectionAge != 2*time.Minute || params.MaxConnectionAgeGrace != 3*time.Minute {
+		t.Fatalf("connection lifetime limits were not applied: %#v", params)
+	}
+}
+
+func TestGrpcServerRejectsNegativeConnectionLifetime(t *testing.T) {
+	_, err := NewGrpcServer(&GrpcServerConfig{MaxConnectionAge: "-1s"})
+	if err == nil || !strings.Contains(err.Error(), "maxConnectionAge") {
+		t.Fatalf("expected invalid connection lifetime error, got %v", err)
+	}
+}
 
 func TestNewGrpcServerAppliesDefaultsWithoutMutatingInput(t *testing.T) {
 	config := &GrpcServerConfig{}

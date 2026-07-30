@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/team-dandelion/quickgo/db/redis"
@@ -13,6 +14,7 @@ import (
 	"github.com/team-dandelion/quickgo/example/framework/auth-server/internal/model"
 	"github.com/team-dandelion/quickgo/grpcep"
 	"github.com/team-dandelion/quickgo/logger"
+	"golang.org/x/crypto/bcrypt"
 
 	gormDB "gorm.io/gorm"
 )
@@ -26,7 +28,8 @@ type AuthService struct {
 	// 模拟用户数据库（如果未配置数据库，使用内存存储）
 	users map[string]*User
 	// 模拟令牌存储（如果未配置 Redis，使用内存存储）
-	tokens map[string]*TokenInfo
+	tokens  map[string]*TokenInfo
+	tokenMu sync.RWMutex
 }
 
 // User 用户信息
@@ -42,9 +45,10 @@ type User struct {
 
 // TokenInfo 令牌信息
 type TokenInfo struct {
-	UserID       string
-	ExpiresAt    time.Time
-	RefreshToken string
+	UserID           string
+	ExpiresAt        time.Time
+	RefreshExpiresAt time.Time
+	RefreshToken     string
 }
 
 // NewAuthService 创建认证服务
@@ -56,7 +60,7 @@ func NewAuthService(db *gormDB.DB, redisClient *redis.Client) *AuthService {
 		"admin": {
 			UserID:   "1",
 			Username: "admin",
-			Password: "admin123", // 实际应该使用哈希
+			Password: mustHashPassword("admin123"),
 			Email:    "admin@example.com",
 			Nickname: "管理员",
 			Avatar:   "",
@@ -65,7 +69,7 @@ func NewAuthService(db *gormDB.DB, redisClient *redis.Client) *AuthService {
 		"user1": {
 			UserID:   "2",
 			Username: "user1",
-			Password: "user123",
+			Password: mustHashPassword("user123"),
 			Email:    "user1@example.com",
 			Nickname: "用户1",
 			Avatar:   "",
@@ -120,7 +124,7 @@ func (s *AuthService) initDefaultUsers(ctx context.Context, db *gormDB.DB) {
 		{
 			UserID:   "1",
 			Username: "admin",
-			Password: "admin123", // 实际应该使用 bcrypt 等哈希
+			Password: mustHashPassword("admin123"),
 			Email:    "admin@example.com",
 			Nickname: "管理员",
 			Avatar:   "",
@@ -129,7 +133,7 @@ func (s *AuthService) initDefaultUsers(ctx context.Context, db *gormDB.DB) {
 		{
 			UserID:   "2",
 			Username: "user1",
-			Password: "user123",
+			Password: mustHashPassword("user123"),
 			Email:    "user1@example.com",
 			Nickname: "用户1",
 			Avatar:   "",
@@ -176,8 +180,7 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 			return resp, nil
 		}
 
-		// 验证密码（实际应该使用 bcrypt 等哈希比较）
-		if userModel.Password != password {
+		if !passwordMatches(userModel.Password, password) {
 			logger.Warn(ctx, "Invalid password: username=%s", username)
 			resp := newLoginResponse()
 			resp.CommonResp.Code = 401
@@ -193,7 +196,7 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 			resp.CommonResp.Msg = "用户名或密码错误"
 			return resp, nil
 		}
-		if user.Password != password {
+		if !passwordMatches(user.Password, password) {
 			resp := newLoginResponse()
 			resp.CommonResp.Code = 401
 			resp.CommonResp.Msg = "用户名或密码错误"
@@ -222,14 +225,15 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 
 	// 存储令牌信息到 Redis 或内存
 	tokenInfo := &TokenInfo{
-		UserID:       userModel.UserID,
-		ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
-		RefreshToken: refreshToken,
+		UserID:           userModel.UserID,
+		ExpiresAt:        time.Now().Add(time.Duration(expiresIn) * time.Second),
+		RefreshExpiresAt: time.Now().Add(time.Duration(expiresIn+3600) * time.Second),
+		RefreshToken:     refreshToken,
 	}
 
 	if s.redis != nil {
 		// 存储到 Redis
-		if err := s.saveTokenToRedis(ctx, token, tokenInfo, time.Duration(expiresIn)*time.Second); err != nil {
+		if err := s.saveTokenToRedis(ctx, token, tokenInfo, time.Duration(expiresIn+3600)*time.Second); err != nil {
 			logger.Error(ctx, "Failed to save token to Redis: %v", err)
 			resp := &gen.LoginResponse{}
 			grpcep.InitResponse(&resp)
@@ -243,7 +247,9 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*ge
 		}
 	} else {
 		// 存储到内存（向后兼容）
+		s.tokenMu.Lock()
 		s.tokens[token] = tokenInfo
+		s.tokenMu.Unlock()
 	}
 
 	logger.Info(ctx, "Login success: username=%s, user_id=%s", username, userModel.UserID)
@@ -286,7 +292,9 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 	} else {
 		// 从内存获取（向后兼容）
 		var exists bool
+		s.tokenMu.RLock()
 		tokenInfo, exists = s.tokens[token]
+		s.tokenMu.RUnlock()
 		if !exists {
 			resp := newVerifyTokenResponse()
 			resp.CommonResp.Code = 401
@@ -301,8 +309,6 @@ func (s *AuthService) VerifyToken(ctx context.Context, token string) (*gen.Verif
 		// 删除过期的令牌
 		if s.redis != nil {
 			s.deleteTokenFromRedis(ctx, token)
-		} else {
-			delete(s.tokens, token)
 		}
 		resp := newVerifyTokenResponse()
 		resp.CommonResp.Code = 401
@@ -397,6 +403,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 	} else {
 		// 从内存查找（向后兼容）
 		found := false
+		s.tokenMu.RLock()
 		for t, info := range s.tokens {
 			if info.RefreshToken == refreshToken {
 				tokenInfo = info
@@ -405,12 +412,27 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 				break
 			}
 		}
+		s.tokenMu.RUnlock()
 		if !found {
 			resp := newRefreshTokenResponse()
 			resp.CommonResp.Code = 401
 			resp.CommonResp.Msg = "刷新令牌无效"
 			return resp, nil
 		}
+	}
+	if tokenInfo.RefreshExpiresAt.IsZero() || time.Now().After(tokenInfo.RefreshExpiresAt) {
+		if s.redis != nil {
+			_ = s.deleteTokenFromRedis(ctx, token)
+			_ = s.deleteRefreshTokenFromRedis(ctx, refreshToken)
+		} else {
+			s.tokenMu.Lock()
+			delete(s.tokens, token)
+			s.tokenMu.Unlock()
+		}
+		resp := newRefreshTokenResponse()
+		resp.CommonResp.Code = 401
+		resp.CommonResp.Msg = "刷新令牌已过期"
+		return resp, nil
 	}
 
 	// 获取用户信息
@@ -451,7 +473,9 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 		s.deleteTokenFromRedis(ctx, token)
 		s.deleteRefreshTokenFromRedis(ctx, refreshToken)
 	} else {
+		s.tokenMu.Lock()
 		delete(s.tokens, token)
+		s.tokenMu.Unlock()
 	}
 
 	// 生成新令牌
@@ -466,14 +490,15 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 
 	// 存储新令牌
 	newTokenInfo := &TokenInfo{
-		UserID:       userModel.UserID,
-		ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
-		RefreshToken: newRefreshToken,
+		UserID:           userModel.UserID,
+		ExpiresAt:        time.Now().Add(time.Duration(expiresIn) * time.Second),
+		RefreshExpiresAt: time.Now().Add(time.Duration(expiresIn+3600) * time.Second),
+		RefreshToken:     newRefreshToken,
 	}
 
 	if s.redis != nil {
 		// 存储到 Redis
-		if err := s.saveTokenToRedis(ctx, newToken, newTokenInfo, time.Duration(expiresIn)*time.Second); err != nil {
+		if err := s.saveTokenToRedis(ctx, newToken, newTokenInfo, time.Duration(expiresIn+3600)*time.Second); err != nil {
 			logger.Error(ctx, "Failed to save token to Redis: %v", err)
 			resp := newRefreshTokenResponse()
 			resp.CommonResp.Code = 500
@@ -486,7 +511,9 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*g
 		}
 	} else {
 		// 存储到内存（向后兼容）
+		s.tokenMu.Lock()
 		s.tokens[newToken] = newTokenInfo
+		s.tokenMu.Unlock()
 	}
 
 	resp := newRefreshTokenResponse()
@@ -573,6 +600,18 @@ func (s *AuthService) generateTokens(userID string) (token, refreshToken string,
 	expiresIn = 7200
 
 	return token, refreshToken, expiresIn, nil
+}
+
+func mustHashPassword(password string) string {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		panic(fmt.Sprintf("failed to hash example password: %v", err))
+	}
+	return string(hash)
+}
+
+func passwordMatches(hash, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
 // getUserByID 根据用户ID获取用户（仅用于内存存储的向后兼容）

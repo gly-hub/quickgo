@@ -54,6 +54,19 @@ func NewValidator() *Validator {
 
 // Validate 验证结构体
 func (v *Validator) Validate(cfg interface{}) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	value := reflect.ValueOf(cfg)
+	for value.Kind() == reflect.Ptr {
+		if value.IsNil() {
+			return fmt.Errorf("config is nil")
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return fmt.Errorf("config must be a struct or struct pointer")
+	}
 	return v.validateValue(reflect.ValueOf(cfg), "")
 }
 
@@ -226,6 +239,8 @@ func (v *Validator) validateRule(fieldName string, val reflect.Value, rule strin
 		if err := validateFilePath(actualVal); err != nil {
 			return &ValidationError{Field: fieldName, Tag: ruleName, Value: actualVal.Interface(), Message: fmt.Sprintf("field '%s': %s", fieldName, err.Error())}
 		}
+	default:
+		return &ValidationError{Field: fieldName, Tag: ruleName, Value: actualVal.Interface(), Message: fmt.Sprintf("field '%s': unknown validation rule '%s'", fieldName, ruleName)}
 	}
 
 	return nil
@@ -279,6 +294,8 @@ func validateMin(val reflect.Value, param string) error {
 		if val.Float() < min {
 			return fmt.Errorf("value must be at least %v", min)
 		}
+	default:
+		return fmt.Errorf("min validation is not supported for %s", val.Kind())
 	}
 	return nil
 }
@@ -310,6 +327,8 @@ func validateMax(val reflect.Value, param string) error {
 		if val.Float() > max {
 			return fmt.Errorf("value must be at most %v", max)
 		}
+	default:
+		return fmt.Errorf("max validation is not supported for %s", val.Kind())
 	}
 	return nil
 }
@@ -343,9 +362,12 @@ func validateURL(val reflect.Value) error {
 	if s == "" {
 		return nil
 	}
-	_, err := url.ParseRequestURI(s)
+	parsed, err := url.ParseRequestURI(s)
 	if err != nil {
 		return fmt.Errorf("invalid URL format")
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("URL must be absolute")
 	}
 	return nil
 }
@@ -455,6 +477,8 @@ func validateGT(val reflect.Value, param string) error {
 		if val.Float() <= threshold {
 			return fmt.Errorf("must be greater than %v", threshold)
 		}
+	default:
+		return fmt.Errorf("gt validation is not supported for %s", val.Kind())
 	}
 	return nil
 }
@@ -478,6 +502,8 @@ func validateGTE(val reflect.Value, param string) error {
 		if val.Float() < threshold {
 			return fmt.Errorf("must be greater than or equal to %v", threshold)
 		}
+	default:
+		return fmt.Errorf("gte validation is not supported for %s", val.Kind())
 	}
 	return nil
 }
@@ -501,6 +527,8 @@ func validateLT(val reflect.Value, param string) error {
 		if val.Float() >= threshold {
 			return fmt.Errorf("must be less than %v", threshold)
 		}
+	default:
+		return fmt.Errorf("lt validation is not supported for %s", val.Kind())
 	}
 	return nil
 }
@@ -524,6 +552,8 @@ func validateLTE(val reflect.Value, param string) error {
 		if val.Float() > threshold {
 			return fmt.Errorf("must be less than or equal to %v", threshold)
 		}
+	default:
+		return fmt.Errorf("lte validation is not supported for %s", val.Kind())
 	}
 	return nil
 }
@@ -543,6 +573,8 @@ func validateLen(val reflect.Value, param string) error {
 		if val.Len() != length {
 			return fmt.Errorf("length must be exactly %d", length)
 		}
+	default:
+		return fmt.Errorf("len validation is not supported for %s", val.Kind())
 	}
 	return nil
 }

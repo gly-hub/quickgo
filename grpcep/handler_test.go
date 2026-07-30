@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"google.golang.org/grpc/metadata"
 )
 
 type testGRPCReq struct {
@@ -17,6 +18,41 @@ type testGRPCReq struct {
 
 type testGRPCResp struct {
 	Data string
+}
+
+func TestRPCCtxOnlyForwardsAllowedMetadata(t *testing.T) {
+	app := fiber.New()
+	handler := &BaseHandler{}
+	app.Get("/", func(c *fiber.Ctx) error {
+		c.Locals("trace_ctx", context.Background())
+		c.Locals("private", "do-not-forward")
+		c.Locals("grpc-metadata-tenant", "tenant-1")
+		ctx := handler.RPCCtx(c)
+		md, ok := metadata.FromOutgoingContext(ctx)
+		if !ok {
+			t.Fatal("expected outgoing metadata")
+		}
+		if got := md.Get("authorization"); len(got) != 1 || got[0] != "Bearer token" {
+			t.Fatalf("authorization was not forwarded: %v", got)
+		}
+		if got := md.Get("tenant"); len(got) != 1 || got[0] != "tenant-1" {
+			t.Fatalf("prefixed metadata was not forwarded: %v", got)
+		}
+		if got := md.Get("private"); len(got) != 0 {
+			t.Fatalf("private Fiber local leaked into metadata: %v", got)
+		}
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	request := httptest.NewRequest("GET", "/", nil)
+	request.Header.Set("Authorization", "Bearer token")
+	response, err := app.Test(request)
+	if err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+	if response.StatusCode != fiber.StatusNoContent {
+		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
 }
 
 func TestValidateGRPCCallHandler(t *testing.T) {
@@ -82,5 +118,35 @@ func TestValidateGRPCCallHandlerRejectsWrongParam(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "second arg") {
 		t.Fatalf("expected second arg error, got %v", err)
+	}
+}
+
+type validRPCStream struct{}
+
+func (*validRPCStream) Recv() (*testGRPCResp, error) { return nil, nil }
+
+func (*validRPCStream) CloseSend() error { return nil }
+
+type invalidRPCStream struct{}
+
+func (*invalidRPCStream) Recv(string) (*testGRPCResp, error) { return nil, nil }
+
+func TestRPCStreamMethodsValidateSignature(t *testing.T) {
+	if _, _, err := rpcStreamMethods(&validRPCStream{}); err != nil {
+		t.Fatalf("expected valid stream signature: %v", err)
+	}
+	if _, _, err := rpcStreamMethods(&invalidRPCStream{}); err == nil {
+		t.Fatal("expected invalid Recv signature to be rejected")
+	}
+	if _, _, err := rpcStreamMethods(nil); err == nil {
+		t.Fatal("expected nil stream to be rejected")
+	}
+}
+
+func TestFormatSSEMessageEncodesEveryContentLine(t *testing.T) {
+	got := formatSSEMessage(7, "first\r\nsecond\rthird\n")
+	want := "id: 7\ndata: first\ndata: second\ndata: third\ndata: \n\n"
+	if got != want {
+		t.Fatalf("unexpected SSE message:\nwant %q\n got %q", want, got)
 	}
 }

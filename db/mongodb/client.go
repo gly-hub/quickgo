@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/team-dandelion/quickgo/logger"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // Client MongoDB 客户端封装
@@ -76,19 +76,19 @@ func NewClient(config *MongoConfig) (*Client, error) {
 		}
 	}
 
-	// 解析并设置 Socket 超时时间
+	// MongoDB Driver v2 使用统一操作超时替代旧的 socket timeout。
 	if config.SocketTimeout != "" {
 		socketTimeout, err := time.ParseDuration(config.SocketTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse SocketTimeout %s: %w", config.SocketTimeout, err)
 		}
 		if socketTimeout > 0 {
-			clientOptions.SetSocketTimeout(socketTimeout)
+			clientOptions.SetTimeout(socketTimeout)
 		}
 	}
 
 	// 创建客户端
-	client, err := mongo.Connect(ctx, clientOptions)
+	client, err := mongo.Connect(clientOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}

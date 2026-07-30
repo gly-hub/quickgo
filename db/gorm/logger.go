@@ -56,6 +56,14 @@ type gormLogger struct {
 	logLevel      logger.LogLevel
 }
 
+// ParamsFilter 默认移除 SQL 参数，避免日志和 trace 泄露敏感值。
+func (l *gormLogger) ParamsFilter(_ context.Context, sql string, params ...interface{}) (string, []interface{}) {
+	if l.config.LogParameters {
+		return sql, params
+	}
+	return sql, nil
+}
+
 // LogMode 设置日志级别
 func (l *gormLogger) LogMode(level logger.LogLevel) logger.Interface {
 	newLogger := *l
