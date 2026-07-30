@@ -91,15 +91,9 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 		logger.Info(context.Background(), "Etcd not configured, running in standalone mode (no service discovery)")
 	}
 
-	keepTime, err := parseDurationOrDefault(config.KeepAliveTime, defaultGrpcServerKeepAliveTime)
+	keepaliveParams, err := grpcServerKeepaliveParameters(config)
 	if err != nil {
-		logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Time: %v", err)
-		return nil, err
-	}
-
-	timeout, err := parseDurationOrDefault(config.KeepAliveTimeout, defaultGrpcServerKeepAliveTimeout)
-	if err != nil {
-		logger.Error(context.Background(), "Failed to parse GrpcServerConfig.Timeout: %v", err)
+		logger.Error(context.Background(), "Failed to parse gRPC keepalive configuration: %v", err)
 		return nil, err
 	}
 
@@ -133,10 +127,7 @@ func NewGrpcServer(config *GrpcServerConfig) (*GrpcServer, error) {
 			rpc.ChainUnaryInterceptor(unaryInterceptors...),
 			rpc.ChainStreamInterceptor(streamInterceptors...),
 			// 添加keepalive配置
-			rpc.KeepaliveParams(keepalive.ServerParameters{
-				Time:    keepTime,
-				Timeout: timeout,
-			}),
+			rpc.KeepaliveParams(keepaliveParams),
 		},
 	})
 
@@ -235,23 +226,29 @@ func (s *GrpcServer) Stop() error {
 	if s == nil || s.server == nil {
 		return nil
 	}
+	var errs []error
 	// 如果有 registrar（etcd 模式），需要注销服务
 	if s.registrar != nil {
-		if err := s.registrar.Deregister(context.Background()); err != nil {
+		deregisterCtx, cancel := context.WithTimeout(context.Background(), defaultEtcdDialTimeout)
+		if err := s.registrar.Deregister(deregisterCtx); err != nil {
 			logger.Error(context.Background(), "Failed to deregister service: %v", err)
-			return err
+			errs = append(errs, fmt.Errorf("deregister service: %w", err))
 		}
+		cancel()
 
 		if err := s.registrar.Close(); err != nil {
 			logger.Error(context.Background(), "Failed to close registrar: %v", err)
-			return err
+			errs = append(errs, fmt.Errorf("close registrar: %w", err))
 		}
 		s.registrar = nil
 	}
 
 	if err := s.server.Stop(); err != nil {
 		logger.Error(context.Background(), "Failed to stop server: %v", err)
-		return err
+		errs = append(errs, fmt.Errorf("stop grpc server: %w", err))
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	return nil
 }
@@ -347,4 +344,49 @@ func parseDurationOrDefault(value string, fallback time.Duration) (time.Duration
 		return fallback, nil
 	}
 	return time.ParseDuration(value)
+}
+
+func grpcServerKeepaliveParameters(config *GrpcServerConfig) (keepalive.ServerParameters, error) {
+	keepAliveTime, err := parseDurationOrDefault(config.KeepAliveTime, defaultGrpcServerKeepAliveTime)
+	if err != nil {
+		return keepalive.ServerParameters{}, fmt.Errorf("parse keepAliveTime: %w", err)
+	}
+	keepAliveTimeout, err := parseDurationOrDefault(config.KeepAliveTimeout, defaultGrpcServerKeepAliveTimeout)
+	if err != nil {
+		return keepalive.ServerParameters{}, fmt.Errorf("parse keepAliveTimeout: %w", err)
+	}
+	maxConnectionIdle, err := parseNonNegativeDuration(config.MaxConnectionIdle)
+	if err != nil {
+		return keepalive.ServerParameters{}, fmt.Errorf("parse maxConnectionIdle: %w", err)
+	}
+	maxConnectionAge, err := parseNonNegativeDuration(config.MaxConnectionAge)
+	if err != nil {
+		return keepalive.ServerParameters{}, fmt.Errorf("parse maxConnectionAge: %w", err)
+	}
+	maxConnectionAgeGrace, err := parseNonNegativeDuration(config.MaxConnectionAgeGrace)
+	if err != nil {
+		return keepalive.ServerParameters{}, fmt.Errorf("parse maxConnectionAgeGrace: %w", err)
+	}
+
+	return keepalive.ServerParameters{
+		MaxConnectionIdle:     maxConnectionIdle,
+		MaxConnectionAge:      maxConnectionAge,
+		MaxConnectionAgeGrace: maxConnectionAgeGrace,
+		Time:                  keepAliveTime,
+		Timeout:               keepAliveTimeout,
+	}, nil
+}
+
+func parseNonNegativeDuration(value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, err
+	}
+	if duration < 0 {
+		return 0, errors.New("duration must not be negative")
+	}
+	return duration, nil
 }

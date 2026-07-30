@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -27,10 +28,24 @@ func FiberMiddleware(m *Metrics) fiber.Handler {
 		err := c.Next()
 
 		duration := time.Since(start)
-		statusCode := strconv.Itoa(c.Response().StatusCode())
-		path := c.Route().Path
-		if path == "" {
-			path = c.Path()
+		status := c.Response().StatusCode()
+		if err != nil {
+			status = fiber.StatusInternalServerError
+			var fiberErr *fiber.Error
+			if errors.As(err, &fiberErr) {
+				status = fiberErr.Code
+			}
+		}
+		statusCode := strconv.Itoa(status)
+		path := "unmatched"
+		if route := c.Route(); route != nil && route.Path != "" && len(route.Handlers) > 0 {
+			path = route.Path
+		}
+		// With a global middleware, Fiber leaves the current route at that
+		// middleware when c.Next returns an unmatched 404. Do not expose the
+		// original request path as a label in that case.
+		if status == fiber.StatusNotFound && path == "/" && c.Path() != "/" {
+			path = "unmatched"
 		}
 
 		m.RecordHTTPRequest(c.Method(), path, statusCode, duration)

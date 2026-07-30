@@ -80,6 +80,54 @@ func TestFiberMiddlewareRecordsHTTPRequest(t *testing.T) {
 	}
 }
 
+func TestFiberMiddlewareRecordsReturnedErrorStatus(t *testing.T) {
+	m := New(Config{Namespace: "test_error"})
+	app := fiber.New()
+	app.Use(FiberMiddleware(m))
+	app.Get("/teapot", func(*fiber.Ctx) error {
+		return fiber.NewError(fiber.StatusTeapot, "teapot")
+	})
+
+	response, err := app.Test(httptest.NewRequest("GET", "/teapot", nil))
+	if err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+	if response.StatusCode != fiber.StatusTeapot {
+		t.Fatalf("expected response status 418, got %d", response.StatusCode)
+	}
+	got := metricValue(t, m.HTTPRequestTotal.WithLabelValues("GET", "/teapot", "418"))
+	if got != 1 {
+		t.Fatalf("expected error metric status 418, got %v", got)
+	}
+}
+
+func TestFiberMiddlewareUsesStableLabelForUnmatchedPaths(t *testing.T) {
+	m := New(Config{Namespace: "test_unmatched"})
+	app := fiber.New()
+	app.Use(FiberMiddleware(m))
+
+	response, err := app.Test(httptest.NewRequest("GET", "/users/42", nil))
+	if err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+	if response.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected 404, got %d", response.StatusCode)
+	}
+	if got := metricValue(t, m.HTTPRequestTotal.WithLabelValues("GET", "unmatched", "404")); got != 1 {
+		t.Fatalf("expected unmatched route metric, got %v", got)
+	}
+}
+
+func TestCustomMetricRejectsIncompatibleLabels(t *testing.T) {
+	m := New(Config{Namespace: "test_custom"})
+	if counter := m.Counter("jobs_total", []string{"queue"}); counter == nil {
+		t.Fatal("expected counter creation to succeed")
+	}
+	if counter := m.Counter("jobs_total", []string{"worker"}); counter != nil {
+		t.Fatal("expected incompatible counter labels to be rejected")
+	}
+}
+
 func TestUnaryServerInterceptorRecordsGRPCRequest(t *testing.T) {
 	m := New(Config{Namespace: "test"})
 	interceptor := UnaryServerInterceptor(m)

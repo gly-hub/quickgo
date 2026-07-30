@@ -3,10 +3,12 @@ package metrics
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/team-dandelion/quickgo/logger"
@@ -44,10 +46,13 @@ type Metrics struct {
 	CircuitBreakerTrips *prometheus.CounterVec
 
 	// 自定义指标
-	customCounters   map[string]*prometheus.CounterVec
-	customGauges     map[string]*prometheus.GaugeVec
-	customHistograms map[string]*prometheus.HistogramVec
-	mu               sync.RWMutex
+	customCounters        map[string]*prometheus.CounterVec
+	customGauges          map[string]*prometheus.GaugeVec
+	customHistograms      map[string]*prometheus.HistogramVec
+	customCounterLabels   map[string]string
+	customGaugeLabels     map[string]string
+	customHistogramLabels map[string]string
+	mu                    sync.RWMutex
 }
 
 // Config 指标配置
@@ -108,14 +113,17 @@ func Global() *Metrics {
 func New(config Config) *Metrics {
 	config = normalizeConfig(config)
 	registry := prometheus.NewRegistry()
-	registry.MustRegister(prometheus.NewGoCollector())
-	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	registry.MustRegister(collectors.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	m := &Metrics{
-		registry:         registry,
-		customCounters:   make(map[string]*prometheus.CounterVec),
-		customGauges:     make(map[string]*prometheus.GaugeVec),
-		customHistograms: make(map[string]*prometheus.HistogramVec),
+		registry:              registry,
+		customCounters:        make(map[string]*prometheus.CounterVec),
+		customGauges:          make(map[string]*prometheus.GaugeVec),
+		customHistograms:      make(map[string]*prometheus.HistogramVec),
+		customCounterLabels:   make(map[string]string),
+		customGaugeLabels:     make(map[string]string),
+		customHistogramLabels: make(map[string]string),
 	}
 
 	if config.EnableHTTP {
@@ -402,7 +410,12 @@ func (m *Metrics) RecordCircuitBreakerTrip(name string) {
 func (m *Metrics) Counter(name string, labels []string) *prometheus.CounterVec {
 	m.mu.RLock()
 	if c, ok := m.customCounters[name]; ok {
+		matches := m.customCounterLabels[name] == metricLabelKey(labels)
 		m.mu.RUnlock()
+		if !matches {
+			logger.Error(context.Background(), "Counter %s was requested with incompatible labels", name)
+			return nil
+		}
 		return c
 	}
 	m.mu.RUnlock()
@@ -411,6 +424,10 @@ func (m *Metrics) Counter(name string, labels []string) *prometheus.CounterVec {
 	defer m.mu.Unlock()
 
 	if c, ok := m.customCounters[name]; ok {
+		if m.customCounterLabels[name] != metricLabelKey(labels) {
+			logger.Error(context.Background(), "Counter %s was requested with incompatible labels", name)
+			return nil
+		}
 		return c
 	}
 
@@ -428,6 +445,7 @@ func (m *Metrics) Counter(name string, labels []string) *prometheus.CounterVec {
 	}
 
 	m.customCounters[name] = c
+	m.customCounterLabels[name] = metricLabelKey(labels)
 	return c
 }
 
@@ -435,7 +453,12 @@ func (m *Metrics) Counter(name string, labels []string) *prometheus.CounterVec {
 func (m *Metrics) Gauge(name string, labels []string) *prometheus.GaugeVec {
 	m.mu.RLock()
 	if g, ok := m.customGauges[name]; ok {
+		matches := m.customGaugeLabels[name] == metricLabelKey(labels)
 		m.mu.RUnlock()
+		if !matches {
+			logger.Error(context.Background(), "Gauge %s was requested with incompatible labels", name)
+			return nil
+		}
 		return g
 	}
 	m.mu.RUnlock()
@@ -444,6 +467,10 @@ func (m *Metrics) Gauge(name string, labels []string) *prometheus.GaugeVec {
 	defer m.mu.Unlock()
 
 	if g, ok := m.customGauges[name]; ok {
+		if m.customGaugeLabels[name] != metricLabelKey(labels) {
+			logger.Error(context.Background(), "Gauge %s was requested with incompatible labels", name)
+			return nil
+		}
 		return g
 	}
 
@@ -461,6 +488,7 @@ func (m *Metrics) Gauge(name string, labels []string) *prometheus.GaugeVec {
 	}
 
 	m.customGauges[name] = g
+	m.customGaugeLabels[name] = metricLabelKey(labels)
 	return g
 }
 
@@ -468,7 +496,12 @@ func (m *Metrics) Gauge(name string, labels []string) *prometheus.GaugeVec {
 func (m *Metrics) Histogram(name string, labels []string, buckets []float64) *prometheus.HistogramVec {
 	m.mu.RLock()
 	if h, ok := m.customHistograms[name]; ok {
+		matches := m.customHistogramLabels[name] == metricLabelKey(labels)
 		m.mu.RUnlock()
+		if !matches {
+			logger.Error(context.Background(), "Histogram %s was requested with incompatible labels", name)
+			return nil
+		}
 		return h
 	}
 	m.mu.RUnlock()
@@ -477,6 +510,10 @@ func (m *Metrics) Histogram(name string, labels []string, buckets []float64) *pr
 	defer m.mu.Unlock()
 
 	if h, ok := m.customHistograms[name]; ok {
+		if m.customHistogramLabels[name] != metricLabelKey(labels) {
+			logger.Error(context.Background(), "Histogram %s was requested with incompatible labels", name)
+			return nil
+		}
 		return h
 	}
 
@@ -499,5 +536,10 @@ func (m *Metrics) Histogram(name string, labels []string, buckets []float64) *pr
 	}
 
 	m.customHistograms[name] = h
+	m.customHistogramLabels[name] = metricLabelKey(labels)
 	return h
+}
+
+func metricLabelKey(labels []string) string {
+	return strings.Join(labels, "\xff")
 }

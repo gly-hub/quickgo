@@ -35,6 +35,51 @@ func TestNewHTTPServerAppliesDefaultsWithoutMutatingInput(t *testing.T) {
 	}
 }
 
+func TestNewHTTPServerDoesNotExposeMetricsByDefault(t *testing.T) {
+	server, err := NewHTTPServer(&HTTPServerConfig{
+		Metrics: &metrics.Config{Namespace: "private"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPServer failed: %v", err)
+	}
+	response, err := server.GetApp().Test(httptest.NewRequest("GET", "/metrics", nil))
+	if err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+	if response.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected metrics endpoint to be disabled, got %d", response.StatusCode)
+	}
+}
+
+func TestMetricsEndpointSupportsBearerToken(t *testing.T) {
+	server, err := NewHTTPServer(&HTTPServerConfig{
+		Metrics:               &metrics.Config{Namespace: "private"},
+		EnableMetricsEndpoint: true,
+		MetricsBearerToken:    "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPServer failed: %v", err)
+	}
+
+	unauthorized, err := server.GetApp().Test(httptest.NewRequest("GET", "/metrics", nil))
+	if err != nil {
+		t.Fatalf("unauthorized request failed: %v", err)
+	}
+	if unauthorized.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", unauthorized.StatusCode)
+	}
+
+	request := httptest.NewRequest("GET", "/metrics", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	authorized, err := server.GetApp().Test(request)
+	if err != nil {
+		t.Fatalf("authorized request failed: %v", err)
+	}
+	if authorized.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected status 200, got %d", authorized.StatusCode)
+	}
+}
+
 func TestNewHTTPServerClonesMetricsConfig(t *testing.T) {
 	config := &HTTPServerConfig{
 		Metrics: &metrics.Config{Namespace: "http", Buckets: []float64{0.1, 0.2}},
@@ -55,7 +100,8 @@ func TestNewHTTPServerClonesMetricsConfig(t *testing.T) {
 
 func TestNewHTTPServerExposesMetricsEndpoint(t *testing.T) {
 	server, err := NewHTTPServer(&HTTPServerConfig{
-		Metrics: &metrics.Config{Namespace: "httpserver"},
+		Metrics:               &metrics.Config{Namespace: "httpserver"},
+		EnableMetricsEndpoint: true,
 	})
 	if err != nil {
 		t.Fatalf("NewHTTPServer failed: %v", err)

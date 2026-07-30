@@ -44,10 +44,7 @@ func NewSUValidator() *validator.Validate {
 		return false
 	})
 	_ = v.RegisterValidation("order", func(fl validator.FieldLevel) bool {
-		if xhOrderPattern.MatchString(fl.Field().String()) {
-			return true
-		}
-		return false
+		return xhOrderPattern.MatchString(fl.Field().String())
 	})
 
 	validate = v

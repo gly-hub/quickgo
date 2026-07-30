@@ -103,12 +103,19 @@ func (e *GErr) GetCause() error {
 
 // GetStack 获取堆栈信息
 func (e *GErr) GetStack() []string {
-	return e.Stack
+	return append([]string(nil), e.Stack...)
 }
 
 // GetMetadata 获取元数据
 func (e *GErr) GetMetadata() map[string]string {
-	return e.Metadata
+	if e.Metadata == nil {
+		return nil
+	}
+	metadata := make(map[string]string, len(e.Metadata))
+	for key, value := range e.Metadata {
+		metadata[key] = value
+	}
+	return metadata
 }
 
 // GetMetadataValue 获取指定 key 的元数据
@@ -134,23 +141,41 @@ func (e *GErr) Is(target error) bool {
 
 // WithMetadata 添加元数据（链式调用）
 func (e *GErr) WithMetadata(key, value string) *GErr {
-	if e.Metadata == nil {
-		e.Metadata = make(map[string]string)
+	cloned := e.clone()
+	if cloned.Metadata == nil {
+		cloned.Metadata = make(map[string]string)
 	}
-	e.Metadata[key] = value
-	return e
+	cloned.Metadata[key] = value
+	return cloned
 }
 
 // WithCause 添加原因错误（链式调用）
 func (e *GErr) WithCause(cause error) *GErr {
-	e.Cause = cause
-	return e
+	cloned := e.clone()
+	cloned.Cause = cause
+	return cloned
 }
 
 // WithType 设置错误类型（链式调用）
 func (e *GErr) WithType(t ErrorType) *GErr {
-	e.Type = t
-	return e
+	cloned := e.clone()
+	cloned.Type = t
+	return cloned
+}
+
+func (e *GErr) clone() *GErr {
+	if e == nil {
+		return nil
+	}
+	cloned := *e
+	cloned.Stack = append([]string(nil), e.Stack...)
+	if e.Metadata != nil {
+		cloned.Metadata = make(map[string]string, len(e.Metadata))
+		for key, value := range e.Metadata {
+			cloned.Metadata[key] = value
+		}
+	}
+	return &cloned
 }
 
 // IsType 检查是否为指定类型的错误

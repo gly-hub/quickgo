@@ -165,7 +165,6 @@ func (s *Server) StartAsync() error {
 	logger.Info(ctx, "gRPC server starting on %s", s.GetAddress())
 
 	// 在goroutine中启动服务器
-	serveErr := make(chan error, 1)
 	go func() {
 		if err := s.server.Serve(listener); err != nil {
 			if !errors.Is(err, grpc.ErrServerStopped) {
@@ -174,7 +173,6 @@ func (s *Server) StartAsync() error {
 				s.running = false
 				s.listener = nil
 				s.mu.Unlock()
-				serveErr <- err
 				return
 			}
 		}
@@ -182,14 +180,11 @@ func (s *Server) StartAsync() error {
 		s.running = false
 		s.listener = nil
 		s.mu.Unlock()
-		serveErr <- nil
 	}()
-	select {
-	case err := <-serveErr:
-		return err
-	case <-time.After(100 * time.Millisecond):
-		return nil
-	}
+
+	// Listen has already bound the socket synchronously. Any Serve error after
+	// this point is a runtime failure and is reflected in IsRunning/logging.
+	return nil
 }
 
 // Stop 停止gRPC服务器

@@ -8,6 +8,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RPC_PID_FILE="$SCRIPT_DIR/.rpc.pid"
 GATEWAY_PID_FILE="$SCRIPT_DIR/.gateway.pid"
+RPC_BIN="$SCRIPT_DIR/.quickgo-rpc-server"
+GATEWAY_BIN="$SCRIPT_DIR/.quickgo-gateway"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -37,10 +39,12 @@ start_rpc() {
     fi
 
     print_info "启动 RPC 服务..."
-    cd "$SCRIPT_DIR/rpc-server/cmd"
-    nohup go run main.go > "$SCRIPT_DIR/.rpc.log" 2>&1 &
+    if ! (cd "$SCRIPT_DIR/rpc-server/cmd" && go build -o "$RPC_BIN" .); then
+        print_error "RPC 服务构建失败"
+        return 1
+    fi
+    nohup "$RPC_BIN" > "$SCRIPT_DIR/.rpc.log" 2>&1 &
     echo $! > "$RPC_PID_FILE"
-    cd "$SCRIPT_DIR"
     print_info "RPC 服务已启动 (PID: $(cat "$RPC_PID_FILE"))"
     print_info "RPC 服务地址: 127.0.0.1:9001"
     print_info "RPC 日志: $SCRIPT_DIR/.rpc.log"
@@ -57,10 +61,12 @@ start_gateway() {
     fi
 
     print_info "启动网关服务..."
-    cd "$SCRIPT_DIR/gateway/cmd"
-    nohup go run main.go > "$SCRIPT_DIR/.gateway.log" 2>&1 &
+    if ! (cd "$SCRIPT_DIR/gateway/cmd" && go build -o "$GATEWAY_BIN" .); then
+        print_error "网关服务构建失败"
+        return 1
+    fi
+    nohup "$GATEWAY_BIN" > "$SCRIPT_DIR/.gateway.log" 2>&1 &
     echo $! > "$GATEWAY_PID_FILE"
-    cd "$SCRIPT_DIR"
     print_info "网关服务已启动 (PID: $(cat "$GATEWAY_PID_FILE"))"
     print_info "网关服务地址: http://127.0.0.1:8080"
     print_info "网关日志: $SCRIPT_DIR/.gateway.log"
@@ -87,10 +93,6 @@ stop_all() {
         fi
         rm -f "$RPC_PID_FILE"
     fi
-
-    # 清理可能残留的进程
-    pkill -f "go run main.go" 2>/dev/null || true
-
     print_info "所有服务已停止"
 }
 

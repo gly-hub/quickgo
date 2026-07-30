@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -232,7 +231,6 @@ func (s *Server) StartAsync() error {
 	}
 
 	listener := s.getListener()
-	serveErr := make(chan error, 1)
 	go func() {
 		ctx := context.Background()
 		logger.Info(ctx, "HTTP server starting on %s", s.GetAddress())
@@ -240,20 +238,15 @@ func (s *Server) StartAsync() error {
 			if !isHTTPServerClosedError(err) {
 				logger.Error(ctx, "HTTP server failed to start: %v", err)
 				s.clearRuntimeState()
-				serveErr <- err
 				return
 			}
 		}
 		s.clearRuntimeState()
-		serveErr <- nil
 	}()
 
-	select {
-	case err := <-serveErr:
-		return err
-	case <-time.After(100 * time.Millisecond):
-		return nil
-	}
+	// Listen has already bound the socket synchronously. A later Listener error
+	// is a runtime failure and is reflected in IsRunning/logging.
+	return nil
 }
 
 // Stop 停止 HTTP 服务器
@@ -366,12 +359,16 @@ func defaultErrorHandler(c *fiber.Ctx, err error) error {
 
 	// 默认返回 500 错误
 	code := fiber.StatusInternalServerError
+	message := "Internal Server Error"
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
+		if code < fiber.StatusInternalServerError {
+			message = e.Message
+		}
 	}
 
 	return c.Status(code).JSON(fiber.Map{
-		"error": err.Error(),
+		"error": message,
 		"code":  code,
 	})
 }

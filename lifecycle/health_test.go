@@ -76,3 +76,47 @@ func TestHealthCheckerOverallAndReadinessRespectTimeouts(t *testing.T) {
 		t.Fatal("expected readiness to be false when a check times out")
 	}
 }
+
+func TestHealthCheckerBoundsChecksThatIgnoreContext(t *testing.T) {
+	checker := NewHealthChecker(HealthCheckerConfig{
+		Timeout:       10 * time.Millisecond,
+		MaxConcurrent: 1,
+	})
+	release := make(chan struct{})
+	checker.RegisterFunc("blocked", func(context.Context) HealthResult {
+		<-release
+		return HealthResult{Status: StatusHealthy}
+	})
+
+	first, ok := checker.CheckOne(context.Background(), "blocked")
+	if !ok || first.Status != StatusUnhealthy {
+		t.Fatalf("expected first blocked check to time out, got %#v", first)
+	}
+	second, ok := checker.CheckOne(context.Background(), "blocked")
+	if !ok || second.Status != StatusUnhealthy || !strings.Contains(second.Message, "execution slot") {
+		t.Fatalf("expected bounded execution slot timeout, got %#v", second)
+	}
+	close(release)
+}
+
+func TestHealthCheckerCopiesDetailsInReturnedAndCachedResults(t *testing.T) {
+	checker := NewHealthChecker(HealthCheckerConfig{})
+	checker.RegisterFunc("database", func(context.Context) HealthResult {
+		return HealthResult{
+			Status:  StatusHealthy,
+			Details: map[string]interface{}{"pool": "ready"},
+		}
+	})
+
+	results := checker.Check(context.Background())
+	results["database"].Details["pool"] = "mutated"
+	if got := checker.LastResult()["database"].Details["pool"]; got != "ready" {
+		t.Fatalf("mutating Check result changed cache: %v", got)
+	}
+
+	last := checker.LastResult()
+	last["database"].Details["pool"] = "mutated-again"
+	if got := checker.LastResult()["database"].Details["pool"]; got != "ready" {
+		t.Fatalf("mutating LastResult changed cache: %v", got)
+	}
+}

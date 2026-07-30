@@ -17,11 +17,6 @@ type AuthHandler struct {
 	authService *service.AuthService
 }
 
-func (h *AuthHandler) mustEmbedUnimplementedAuthServiceServer() {
-	//TODO implement me
-	panic("implement me")
-}
-
 // NewAuthHandler 创建认证处理器
 func NewAuthHandler(authService *service.AuthService) *AuthHandler {
 	return &AuthHandler{

@@ -2,6 +2,7 @@ package quickgo
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 
@@ -45,6 +46,10 @@ type HTTPServerConfig struct {
 	Metrics *metrics.Config `json:"metrics" yaml:"metrics"`
 	// MetricsPath 指标暴露路径，默认 /metrics
 	MetricsPath string `json:"metricsPath" yaml:"metricsPath"`
+	// EnableMetricsEndpoint 显式启用指标路由。默认关闭，避免意外公开运行信息。
+	EnableMetricsEndpoint bool `json:"enableMetricsEndpoint" yaml:"enableMetricsEndpoint"`
+	// MetricsBearerToken 可选的指标端点 Bearer Token。
+	MetricsBearerToken string `json:"metricsBearerToken" yaml:"metricsBearerToken"`
 	// DisableMetricsEndpoint 显式禁用 /metrics 路由
 	DisableMetricsEndpoint bool `json:"disableMetricsEndpoint" yaml:"disableMetricsEndpoint"`
 
@@ -128,12 +133,17 @@ func NewHTTPServer(config *HTTPServerConfig) (*HTTPServer, error) {
 		return nil, fmt.Errorf("failed to create http server: %w", err)
 	}
 
-	if metricCollector != nil && !config.DisableMetricsEndpoint {
+	if metricCollector != nil && config.EnableMetricsEndpoint && !config.DisableMetricsEndpoint {
 		metricsPath := config.MetricsPath
 		if metricsPath == "" {
 			metricsPath = "/metrics"
 		}
-		server.GetApp().Get(metricsPath, adaptor.HTTPHandler(metricCollector.Handler()))
+		handlers := make([]fiber.Handler, 0, 2)
+		if config.MetricsBearerToken != "" {
+			handlers = append(handlers, metricsBearerAuth(config.MetricsBearerToken))
+		}
+		handlers = append(handlers, adaptor.HTTPHandler(metricCollector.Handler()))
+		server.GetApp().Get(metricsPath, handlers...)
 	}
 
 	return &HTTPServer{
@@ -141,6 +151,17 @@ func NewHTTPServer(config *HTTPServerConfig) (*HTTPServer, error) {
 		config:  config,
 		metrics: metricCollector,
 	}, nil
+}
+
+func metricsBearerAuth(token string) fiber.Handler {
+	expected := []byte("Bearer " + token)
+	return func(c *fiber.Ctx) error {
+		provided := []byte(c.Get(fiber.HeaderAuthorization))
+		if len(provided) != len(expected) || subtle.ConstantTimeCompare(provided, expected) != 1 {
+			return fiber.ErrUnauthorized
+		}
+		return c.Next()
+	}
 }
 
 func cloneHTTPServerConfig(config *HTTPServerConfig) *HTTPServerConfig {

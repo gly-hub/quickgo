@@ -1,2 +1,2 @@
 proto:
-	protoc -I=. -I=./ --gogofaster_out=plugins=grpc:. *.proto
+	protoc --gogofaster_out=plugins=grpc:. *.proto

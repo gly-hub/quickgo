@@ -148,18 +148,14 @@ tracing:
   serviceVersion: "1.0.0"
   environment: "local"
   samplingRate: 1.0  # 采样率：1.0 表示采样所有请求
-  # 方式1：使用 OTLP（推荐）
   otlp:
     enabled: true
     endpoint: "http://localhost:4318"  # HTTP 端点
     useGRPC: false
     insecure: true
-  # 方式2：使用 Jaeger Agent（UDP）
-  jaeger:
-    enabled: false
-    agentHost: "localhost"
-    agentPort: 6831
 ```
+
+Jaeger 通过 OTLP 接收数据；旧 Jaeger Agent exporter 已移除。
 
 ### 查看追踪数据
 
@@ -221,4 +217,3 @@ API 定义，包括：
 2. 先启动 auth-server，再启动 gateway
 3. 确保配置文件路径正确
 4. proto 文件需要先编译生成 Go 代码
-

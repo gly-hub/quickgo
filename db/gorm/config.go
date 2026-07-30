@@ -76,10 +76,14 @@ type GormConfig struct {
 	SlowThreshold int    `json:"slowThreshold" yaml:"slowThreshold" toml:"slowThreshold"` // 慢查询阈值（毫秒）
 	// 是否启用日志
 	EnableLog bool `json:"enableLog" yaml:"enableLog" toml:"enableLog"`
+	// 是否在日志和 span 中记录 SQL 参数。默认 false，避免泄露凭证和个人数据。
+	LogParameters bool `json:"logParameters" yaml:"logParameters" toml:"logParameters"`
 }
 
 // GormManagerConfig GORM 管理器配置（支持多个数据库实例）
 type GormManagerConfig struct {
 	// 数据库配置列表
 	Databases []GormConfig `json:"databases" yaml:"databases" toml:"databases"`
+	// 允许部分数据库在初始化时不可用。默认 false，保持 fail-fast 行为。
+	AllowUnavailable bool `json:"allowUnavailable" yaml:"allowUnavailable" toml:"allowUnavailable"`
 }
