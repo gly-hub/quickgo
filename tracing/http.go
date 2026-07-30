@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
@@ -23,25 +24,15 @@ func Middleware() fiber.Handler {
 
 		// 提取 trace context
 		propagator := otel.GetTextMapPropagator()
-		headers := make(map[string]string)
-		c.Request().Header.VisitAll(func(key, value []byte) {
-			headers[string(key)] = string(value)
-		})
-		ctx = propagator.Extract(ctx, &headerCarrier{headers: headers})
+		ctx = propagator.Extract(ctx, &requestHeaderCarrier{c: c})
 
 		// 创建 span
 		tracer := GetTracer()
-		route := c.Route().Path
-		if route == "" {
-			route = c.Path()
-		}
-		spanName := c.Method() + " " + route
+		spanName := c.Method()
 		ctx, span := tracer.Start(ctx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
 				semconv.HTTPMethodKey.String(c.Method()),
-				semconv.HTTPRouteKey.String(route),
-				semconv.HTTPURLKey.String(c.OriginalURL()),
 				semconv.NetHostNameKey.String(c.Hostname()),
 				attribute.String("net.sock.peer.addr", c.IP()),
 			),
@@ -65,9 +56,22 @@ func Middleware() fiber.Handler {
 
 		// 处理请求
 		err := c.Next()
+		route := "unmatched"
+		if currentRoute := c.Route(); currentRoute != nil && currentRoute.Path != "" {
+			route = currentRoute.Path
+		}
+		span.SetName(c.Method() + " " + route)
+		span.SetAttributes(semconv.HTTPRouteKey.String(route))
 
 		// 设置响应状态码
 		statusCode := c.Response().StatusCode()
+		if err != nil {
+			statusCode = fiber.StatusInternalServerError
+			var fiberErr *fiber.Error
+			if errors.As(err, &fiberErr) {
+				statusCode = fiberErr.Code
+			}
+		}
 		span.SetAttributes(semconv.HTTPStatusCodeKey.Int(statusCode))
 
 		// 设置 span 状态
@@ -107,16 +111,11 @@ func (h *responseHeaderCarrier) Keys() []string {
 
 // ExtractTraceContext 从 HTTP 请求中提取 trace context
 func ExtractTraceContextFromRequest(c *fiber.Ctx) context.Context {
-	ctx := c.Context()
+	ctx := c.UserContext()
 
 	// 使用 OpenTelemetry 的 propagator 提取 trace context
 	propagator := otel.GetTextMapPropagator()
-	headers := make(map[string]string)
-	c.Request().Header.VisitAll(func(key, value []byte) {
-		headers[string(key)] = string(value)
-	})
-
-	return propagator.Extract(ctx, &headerCarrier{headers: headers})
+	return propagator.Extract(ctx, &requestHeaderCarrier{c: c})
 }
 
 // SetSpanError 设置 span 错误状态（在 grpc.go 中也有定义，这里保留以保持一致性）
@@ -134,23 +133,23 @@ func SetSpanAttributes(span trace.Span, attrs ...attribute.KeyValue) {
 	span.SetAttributes(attrs...)
 }
 
-// headerCarrier 实现 propagation.TextMapCarrier 接口，用于在 HTTP headers 中传递 trace context
-type headerCarrier struct {
-	headers map[string]string
+// requestHeaderCarrier 使用 Fiber 的大小写不敏感 Header API。
+type requestHeaderCarrier struct {
+	c *fiber.Ctx
 }
 
-func (h *headerCarrier) Get(key string) string {
-	return h.headers[key]
+func (h *requestHeaderCarrier) Get(key string) string {
+	return h.c.Get(key)
 }
 
-func (h *headerCarrier) Set(key, value string) {
-	h.headers[key] = value
+func (h *requestHeaderCarrier) Set(key, value string) {
+	h.c.Request().Header.Set(key, value)
 }
 
-func (h *headerCarrier) Keys() []string {
-	keys := make([]string, 0, len(h.headers))
-	for k := range h.headers {
-		keys = append(keys, k)
-	}
+func (h *requestHeaderCarrier) Keys() []string {
+	keys := make([]string, 0, h.c.Request().Header.Len())
+	h.c.Request().Header.VisitAll(func(key, _ []byte) {
+		keys = append(keys, string(key))
+	})
 	return keys
 }

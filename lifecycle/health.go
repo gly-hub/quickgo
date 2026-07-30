@@ -54,11 +54,13 @@ type HealthChecker struct {
 	checks     map[string]HealthCheck
 	timeout    time.Duration
 	lastResult map[string]HealthResult
+	slots      chan struct{}
 }
 
 // HealthCheckerConfig 健康检查器配置
 type HealthCheckerConfig struct {
-	Timeout time.Duration
+	Timeout       time.Duration
+	MaxConcurrent int
 }
 
 // NewHealthChecker 创建健康检查器
@@ -66,11 +68,15 @@ func NewHealthChecker(config HealthCheckerConfig) *HealthChecker {
 	if config.Timeout <= 0 {
 		config.Timeout = 5 * time.Second
 	}
+	if config.MaxConcurrent <= 0 {
+		config.MaxConcurrent = 64
+	}
 
 	return &HealthChecker{
 		checks:     make(map[string]HealthCheck),
 		timeout:    config.Timeout,
 		lastResult: make(map[string]HealthResult),
+		slots:      make(chan struct{}, config.MaxConcurrent),
 	}
 }
 
@@ -114,26 +120,53 @@ func (h *HealthChecker) Check(ctx context.Context) map[string]HealthResult {
 	}
 
 	results := make(map[string]HealthResult, len(checks))
-	resultCh := make(chan checkResult, len(checks))
-	for name, check := range checks {
-		go func(name string, check HealthCheck) {
-			resultCh <- checkResult{name: name, result: h.runCheck(ctx, name, check)}
-		}(name, check)
+	if len(checks) == 0 {
+		return results
 	}
 
-	for range checks {
-		result := <-resultCh
-		results[result.name] = result.result
+	workerCount := len(checks)
+	if maxConcurrent := cap(h.slots); workerCount > maxConcurrent {
+		workerCount = maxConcurrent
+	}
+
+	type checkJob struct {
+		name  string
+		check HealthCheck
+	}
+	jobs := make(chan checkJob)
+	resultCh := make(chan checkResult, len(checks))
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				resultCh <- checkResult{name: job.name, result: h.runCheck(ctx, job.name, job.check)}
+			}
+		}()
+	}
+
+	go func() {
+		workers.Wait()
+		close(resultCh)
+	}()
+	for name, check := range checks {
+		jobs <- checkJob{name: name, check: check}
+	}
+	close(jobs)
+
+	for result := range resultCh {
+		results[result.name] = cloneHealthResult(result.result)
 	}
 
 	// 更新缓存
 	h.mu.Lock()
 	for k, v := range results {
-		h.lastResult[k] = v
+		h.lastResult[k] = cloneHealthResult(v)
 	}
 	h.mu.Unlock()
 
-	return results
+	return cloneHealthResults(results)
 }
 
 func (h *HealthChecker) runCheck(ctx context.Context, name string, check HealthCheck) HealthResult {
@@ -141,7 +174,17 @@ func (h *HealthChecker) runCheck(ctx context.Context, name string, check HealthC
 	defer cancel()
 
 	resultCh := make(chan HealthResult, 1)
+	select {
+	case h.slots <- struct{}{}:
+	case <-checkCtx.Done():
+		return HealthResult{
+			Status:  StatusUnhealthy,
+			Message: fmt.Sprintf("health check %s timed out waiting for an execution slot: %v", name, checkCtx.Err()),
+			Time:    time.Now(),
+		}
+	}
 	go func() {
+		defer func() { <-h.slots }()
 		defer func() {
 			if r := recover(); r != nil {
 				resultCh <- HealthResult{
@@ -182,11 +225,11 @@ func (h *HealthChecker) CheckOne(ctx context.Context, name string) (HealthResult
 		return HealthResult{}, false
 	}
 
-	result := h.runCheck(ctx, name, check)
+	result := cloneHealthResult(h.runCheck(ctx, name, check))
 
 	// 更新缓存
 	h.mu.Lock()
-	h.lastResult[name] = result
+	h.lastResult[name] = cloneHealthResult(result)
 	h.mu.Unlock()
 
 	return result, true
@@ -199,9 +242,29 @@ func (h *HealthChecker) LastResult() map[string]HealthResult {
 
 	results := make(map[string]HealthResult)
 	for k, v := range h.lastResult {
-		results[k] = v
+		results[k] = cloneHealthResult(v)
 	}
 	return results
+}
+
+func cloneHealthResults(results map[string]HealthResult) map[string]HealthResult {
+	cloned := make(map[string]HealthResult, len(results))
+	for name, result := range results {
+		cloned[name] = cloneHealthResult(result)
+	}
+	return cloned
+}
+
+func cloneHealthResult(result HealthResult) HealthResult {
+	cloned := result
+	if result.Details == nil {
+		return cloned
+	}
+	cloned.Details = make(map[string]interface{}, len(result.Details))
+	for key, value := range result.Details {
+		cloned.Details[key] = value
+	}
+	return cloned
 }
 
 // OverallStatus 获取总体状态

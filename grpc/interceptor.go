@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"time"
 
@@ -95,6 +96,7 @@ func RecoveryInterceptor() grpc.UnaryServerInterceptor {
 
 // AuthInterceptor 认证拦截器示例
 func AuthInterceptor(token string) grpc.UnaryServerInterceptor {
+	expectedToken := []byte("Bearer " + token)
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 		// 跳过健康检查
 		if info.FullMethod == "/grpc.health.v1.Health/Check" {
@@ -111,7 +113,7 @@ func AuthInterceptor(token string) grpc.UnaryServerInterceptor {
 			return nil, status.Error(codes.Unauthenticated, "missing authorization header")
 		}
 
-		if authHeader[0] != "Bearer "+token {
+		if subtle.ConstantTimeCompare([]byte(authHeader[0]), expectedToken) != 1 {
 			return nil, status.Error(codes.Unauthenticated, "invalid token")
 		}
 
@@ -288,10 +290,14 @@ func ClientLoggingInterceptor() grpc.UnaryClientInterceptor {
 // ClientAuthInterceptor 客户端认证拦截器
 func ClientAuthInterceptor(token string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		// 添加认证头
-		md := metadata.New(map[string]string{
-			"authorization": "Bearer " + token,
-		})
+		// 添加认证头，同时保留调用方和其他拦截器写入的 metadata。
+		md, ok := metadata.FromOutgoingContext(ctx)
+		if !ok {
+			md = metadata.New(nil)
+		} else {
+			md = md.Copy()
+		}
+		md.Set("authorization", "Bearer "+token)
 		ctx = metadata.NewOutgoingContext(ctx, md)
 
 		return invoker(ctx, method, req, reply, cc, opts...)

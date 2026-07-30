@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -340,6 +341,66 @@ func TestGlobalCloseResetsDefaultLogger(t *testing.T) {
 	}
 	if second == first {
 		t.Fatal("expected Close to reset default logger")
+	}
+}
+
+func TestInitClosesPreviousGlobalLogger(t *testing.T) {
+	defer Close()
+	firstPath := filepath.Join(t.TempDir(), "first.log")
+	secondPath := filepath.Join(t.TempDir(), "second.log")
+	if err := Init(Config{Level: LevelInfo, Output: firstPath}); err != nil {
+		t.Fatalf("first Init failed: %v", err)
+	}
+	first := GetDefault()
+	firstOutput := first.output
+
+	if err := Init(Config{Level: LevelInfo, Output: secondPath}); err != nil {
+		t.Fatalf("second Init failed: %v", err)
+	}
+	if GetDefault() == first {
+		t.Fatal("expected second Init to replace the global logger")
+	}
+	if _, err := firstOutput.Write([]byte("closed\n")); err == nil {
+		t.Fatal("expected first logger output to be closed after reinitialization")
+	}
+}
+
+func TestLoggerCloseIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logger.log")
+	logger, err := NewLogger(Config{Level: LevelInfo, Output: path})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("first Close failed: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+}
+
+func TestCloseIfDefaultDoesNotCloseReplacement(t *testing.T) {
+	defer Close()
+	firstPath := filepath.Join(t.TempDir(), "first.log")
+	secondPath := filepath.Join(t.TempDir(), "second.log")
+	if err := Init(Config{Level: LevelInfo, Output: firstPath}); err != nil {
+		t.Fatalf("first Init failed: %v", err)
+	}
+	first := GetDefault()
+	if err := Init(Config{Level: LevelInfo, Output: secondPath}); err != nil {
+		t.Fatalf("second Init failed: %v", err)
+	}
+	second := GetDefault()
+
+	closed, err := CloseIfDefault(first)
+	if err != nil {
+		t.Fatalf("CloseIfDefault failed: %v", err)
+	}
+	if closed {
+		t.Fatal("expected replacement logger to remain global")
+	}
+	if GetDefault() != second {
+		t.Fatal("CloseIfDefault replaced the current global logger")
 	}
 }
 

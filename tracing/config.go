@@ -15,8 +15,10 @@ type Config struct {
 	Jaeger JaegerConfig `json:"jaeger" yaml:"jaeger" toml:"jaeger"`
 	// OTLP 配置（推荐使用，Jaeger 支持 OTLP）
 	OTLP OTLPConfig `json:"otlp" yaml:"otlp" toml:"otlp"`
-	// 采样率（0.0-1.0，0.0 表示不采样，1.0 表示采样所有请求）
+	// 采样率（0.0-1.0）。零值使用默认值 1.0。
 	SamplingRate float64 `json:"samplingRate" yaml:"samplingRate" toml:"samplingRate"`
+	// DisableSampling 显式禁用采样。
+	DisableSampling bool `json:"disableSampling" yaml:"disableSampling" toml:"disableSampling"`
 }
 
 // DefaultConfig 返回推荐默认配置。

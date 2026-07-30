@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -78,6 +79,13 @@ func LoggingMiddleware() fiber.Handler {
 		// 计算耗时
 		duration := time.Since(start)
 		statusCode := c.Response().StatusCode()
+		if err != nil {
+			statusCode = fiber.StatusInternalServerError
+			var fiberErr *fiber.Error
+			if errors.As(err, &fiberErr) {
+				statusCode = fiberErr.Code
+			}
+		}
 
 		// 记录响应信息
 		if err != nil {
@@ -138,25 +146,29 @@ func RecoveryMiddleware() fiber.Handler {
 	}
 }
 
-// TimeoutMiddleware 超时中间件
+// TimeoutMiddleware configures a cooperative request deadline.
+//
+// Downstream handlers and I/O operations must honor c.UserContext() for the
+// request to complete at the deadline. Go cannot safely preempt a Fiber
+// handler that ignores its context; the deprecated Fiber hard-timeout wrapper
+// races with fiber.Ctx access.
 func TimeoutMiddleware(timeout time.Duration) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		// 使用 channel 来检测超时
-		done := make(chan error, 1)
-		go func() {
-			done <- c.Next()
-		}()
-
-		select {
-		case <-time.After(timeout):
-			c.Status(fiber.StatusRequestTimeout).JSON(fiber.Map{
-				"error": "Request Timeout",
-				"code":  fiber.StatusRequestTimeout,
-			})
-			return fiber.NewError(fiber.StatusRequestTimeout, "Request Timeout")
-		case err := <-done:
-			return err
+	if timeout <= 0 {
+		return func(c *fiber.Ctx) error {
+			return c.Next()
 		}
+	}
+
+	return func(c *fiber.Ctx) error {
+		ctx, cancel := context.WithTimeout(c.UserContext(), timeout)
+		defer cancel()
+		c.SetUserContext(ctx)
+
+		err := c.Next()
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fiber.ErrRequestTimeout
+		}
+		return err
 	}
 }
 

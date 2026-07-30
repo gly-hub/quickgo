@@ -50,11 +50,11 @@ func (r *StaticRegistry) Register(ctx context.Context, serviceName, address stri
 	info := ServiceInfo{
 		Name:     serviceName,
 		Address:  address,
-		Metadata: metadata,
+		Metadata: cloneMetadata(metadata),
 		Weight:   1,
 	}
 
-	if weight, ok := metadata["weight"]; ok {
+	if weight, ok := info.Metadata["weight"]; ok {
 		if w, err := parseInt(weight); err == nil {
 			info.Weight = w
 		}
@@ -101,7 +101,28 @@ func (r *StaticRegistry) Close() error {
 func (r *StaticRegistry) GetServices(serviceName string) []ServiceInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.services[serviceName]
+
+	services := r.services[serviceName]
+	if services == nil {
+		return nil
+	}
+	cloned := make([]ServiceInfo, len(services))
+	for i, service := range services {
+		cloned[i] = service
+		cloned[i].Metadata = cloneMetadata(service.Metadata)
+	}
+	return cloned
+}
+
+func cloneMetadata(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // parseInt 解析整数（辅助函数）
@@ -129,6 +150,7 @@ type ServiceRegistrar struct {
 	address         string
 	metadata        map[string]string
 	keepAliveTicker *time.Ticker
+	keepAliveCancel context.CancelFunc
 	ctx             context.Context
 	cancel          context.CancelFunc
 	mu              sync.Mutex
@@ -141,7 +163,7 @@ func NewServiceRegistrar(registry ServiceRegistry, serviceName, address string, 
 		registry:    registry,
 		serviceName: serviceName,
 		address:     address,
-		metadata:    metadata,
+		metadata:    cloneMetadata(metadata),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -152,7 +174,7 @@ func (sr *ServiceRegistrar) Register(ctx context.Context) error {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
-	if err := sr.registry.Register(ctx, sr.serviceName, sr.address, sr.metadata); err != nil {
+	if err := sr.registry.Register(ctx, sr.serviceName, sr.address, cloneMetadata(sr.metadata)); err != nil {
 		return fmt.Errorf("failed to register service: %w", err)
 	}
 
@@ -163,22 +185,32 @@ func (sr *ServiceRegistrar) Register(ctx context.Context) error {
 // StartKeepAlive 启动心跳保持服务活跃
 // Deprecated: registries that need keepalive should own their lease renewal.
 func (sr *ServiceRegistrar) StartKeepAlive(interval time.Duration) {
-	if interval == 0 {
+	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 
 	sr.mu.Lock()
-	sr.keepAliveTicker = time.NewTicker(interval)
+	if sr.keepAliveTicker != nil {
+		sr.mu.Unlock()
+		return
+	}
+	ticker := time.NewTicker(interval)
+	keepAliveCtx, keepAliveCancel := context.WithCancel(sr.ctx)
+	sr.keepAliveTicker = ticker
+	sr.keepAliveCancel = keepAliveCancel
+	registry := sr.registry
+	serviceName := sr.serviceName
+	address := sr.address
 	sr.mu.Unlock()
 
 	go func() {
 		for {
 			select {
-			case <-sr.ctx.Done():
+			case <-keepAliveCtx.Done():
 				return
-			case <-sr.keepAliveTicker.C:
-				if err := sr.registry.KeepAlive(sr.ctx, sr.serviceName, sr.address); err != nil {
-					logger.Error(sr.ctx, "KeepAlive failed: service=%s, address=%s, error=%v", sr.serviceName, sr.address, err)
+			case <-ticker.C:
+				if err := registry.KeepAlive(keepAliveCtx, serviceName, address); err != nil {
+					logger.Error(keepAliveCtx, "KeepAlive failed: service=%s, address=%s, error=%v", serviceName, address, err)
 				}
 			}
 		}
@@ -190,11 +222,7 @@ func (sr *ServiceRegistrar) Deregister(ctx context.Context) error {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
-	// 停止心跳
-	if sr.keepAliveTicker != nil {
-		sr.keepAliveTicker.Stop()
-		sr.keepAliveTicker = nil
-	}
+	sr.stopKeepAliveLocked()
 
 	if err := sr.registry.Deregister(ctx, sr.serviceName, sr.address); err != nil {
 		return fmt.Errorf("failed to deregister service: %w", err)
@@ -206,6 +234,28 @@ func (sr *ServiceRegistrar) Deregister(ctx context.Context) error {
 
 // Close 关闭注册器
 func (sr *ServiceRegistrar) Close() error {
-	sr.cancel()
-	return sr.registry.Close()
+	sr.mu.Lock()
+	sr.stopKeepAliveLocked()
+	cancel := sr.cancel
+	registry := sr.registry
+	sr.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if registry == nil {
+		return nil
+	}
+	return registry.Close()
+}
+
+func (sr *ServiceRegistrar) stopKeepAliveLocked() {
+	if sr.keepAliveTicker != nil {
+		sr.keepAliveTicker.Stop()
+		sr.keepAliveTicker = nil
+	}
+	if sr.keepAliveCancel != nil {
+		sr.keepAliveCancel()
+		sr.keepAliveCancel = nil
+	}
 }
