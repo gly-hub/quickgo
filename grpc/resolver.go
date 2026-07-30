@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc/resolver"
 
@@ -35,6 +36,13 @@ type ServiceDiscovery interface {
 
 type discoveryKeyer interface {
 	DiscoveryKey() string
+}
+
+// watchUntilDoneDiscovery is implemented by discoveries whose Watch method is
+// intentionally asynchronous. It lets the gRPC resolver observe a terminated
+// watch and establish a new one without changing the public Watch contract.
+type watchUntilDoneDiscovery interface {
+	watchUntilDone(ctx context.Context, serviceName string, callback func([]string)) error
 }
 
 // StaticResolver 静态服务发现（直接指定地址列表）
@@ -122,11 +130,14 @@ func (b *resolverBuilder) Build(target resolver.Target, cc resolver.ClientConn, 
 		return nil, fmt.Errorf("resolver scheme %s is not active", b.scheme)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	r := &serviceResolver{
-		target: target,
-		cc:     cc,
-		sd:     sd,
-		ctx:    context.Background(),
+		target:      target,
+		cc:          cc,
+		sd:          sd,
+		ctx:         ctx,
+		cancel:      cancel,
+		serviceName: serviceNameFromTarget(target),
 	}
 
 	// 启动解析
@@ -153,74 +164,114 @@ type serviceResolver struct {
 	sd          ServiceDiscovery
 	ctx         context.Context
 	cancel      context.CancelFunc
-	mu          sync.Mutex
 	serviceName string // 缓存解析后的服务名
+	stateMu     sync.Mutex
+	closeOnce   sync.Once
+	retryDelay  time.Duration
 }
 
 // getServiceName 从 target 中解析服务名（兼容新旧版本 gRPC）
 func (r *serviceResolver) getServiceName() string {
-	if r.serviceName != "" {
-		return r.serviceName
-	}
+	return r.serviceName
+}
 
+func serviceNameFromTarget(target resolver.Target) string {
 	// 尝试从 Endpoint() 获取（旧版本 gRPC）
-	serviceName := r.target.Endpoint()
+	serviceName := target.Endpoint()
 	if serviceName == "" {
 		// 新版本 gRPC 中 Endpoint() 可能返回空，需要从 URL 中获取
 		// 格式: etcd://service-name 或 etcd:///service-name
-		if r.target.URL.Host != "" {
-			serviceName = r.target.URL.Host
-		} else if r.target.URL.Opaque != "" {
-			serviceName = r.target.URL.Opaque
+		if target.URL.Host != "" {
+			serviceName = target.URL.Host
+		} else if target.URL.Opaque != "" {
+			serviceName = target.URL.Opaque
 		} else {
 			// 移除开头的 /
-			serviceName = strings.TrimPrefix(r.target.URL.Path, "/")
+			serviceName = strings.TrimPrefix(target.URL.Path, "/")
 		}
 	}
-
-	r.serviceName = serviceName
 	return serviceName
 }
 
 // start 开始解析
 func (r *serviceResolver) start() {
-	r.mu.Lock()
-	r.ctx, r.cancel = context.WithCancel(context.Background())
-	r.mu.Unlock()
+	ctx := r.ctx
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
 
 	serviceName := r.getServiceName()
 	if serviceName == "" {
-		logger.Error(r.ctx, "Failed to parse service name from target: %v", r.target)
+		logger.Error(ctx, "Failed to parse service name from target: %v", r.target)
 		return
 	}
 
 	logger.Info(r.ctx, "Resolver starting for service: %s", serviceName)
 
 	// 首次解析
-	addresses, err := r.sd.Resolve(r.ctx, serviceName)
+	addresses, err := r.sd.Resolve(ctx, serviceName)
 	if err != nil {
 		logger.Error(r.ctx, "Failed to resolve service: service=%s, error=%v", serviceName, err)
-		return
+		r.cc.ReportError(err)
+	} else {
+		r.updateState(addresses)
 	}
 
-	r.updateState(addresses)
+	watch := r.sd.Watch
+	restartWatch := false
+	if lifecycleWatcher, ok := r.sd.(watchUntilDoneDiscovery); ok {
+		watch = lifecycleWatcher.watchUntilDone
+		restartWatch = true
+	}
 
-	// 监听服务变化
-	go func() {
-		err := r.sd.Watch(r.ctx, serviceName, func(addrs []string) {
+	for {
+		err := watch(ctx, serviceName, func(addrs []string) {
 			r.updateState(addrs)
 		})
-		if err != nil {
-			logger.Error(r.ctx, "Service discovery watch failed: service=%s, error=%v", serviceName, err)
+		if ctx.Err() != nil {
+			return
 		}
-	}()
+		if err == nil && !restartWatch {
+			return
+		}
+		if err == nil {
+			logger.Warn(ctx, "Service discovery watch ended unexpectedly: service=%s", serviceName)
+		} else {
+			logger.Error(ctx, "Service discovery watch failed: service=%s, error=%v", serviceName, err)
+			r.cc.ReportError(err)
+		}
+
+		delay := r.retryDelay
+		if delay <= 0 {
+			delay = time.Second
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if addresses, resolveErr := r.sd.Resolve(ctx, serviceName); resolveErr == nil {
+			r.updateState(addresses)
+		}
+	}
 }
 
 // updateState 更新连接状态
 func (r *serviceResolver) updateState(addresses []string) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	if r.ctx == nil || r.ctx.Err() != nil {
+		return
+	}
+
 	serviceName := r.getServiceName()
 	if len(addresses) == 0 {
 		logger.Warn(r.ctx, "No addresses available for service: service=%s", serviceName)
+		if err := r.cc.UpdateState(resolver.State{}); err != nil {
+			logger.Error(r.ctx, "Failed to clear resolver state: service=%s, error=%v", serviceName, err)
+		}
 		return
 	}
 
@@ -245,6 +296,9 @@ func (r *serviceResolver) updateState(addresses []string) {
 
 // ResolveNow 立即重新解析
 func (r *serviceResolver) ResolveNow(resolver.ResolveNowOptions) {
+	if r.ctx == nil || r.ctx.Err() != nil {
+		return
+	}
 	serviceName := r.getServiceName()
 	if serviceName == "" {
 		return
@@ -259,11 +313,15 @@ func (r *serviceResolver) ResolveNow(resolver.ResolveNowOptions) {
 
 // Close 关闭 resolver
 func (r *serviceResolver) Close() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cancel != nil {
-		r.cancel()
-	}
+	r.closeOnce.Do(func() {
+		if r.cancel != nil {
+			r.cancel()
+		}
+		// Wait for an in-flight state update so Close does not return while a
+		// callback can still update the underlying ClientConn.
+		r.stateMu.Lock()
+		r.stateMu.Unlock()
+	})
 }
 
 type registeredResolver struct {

@@ -42,13 +42,14 @@ type Framework struct {
 	initializedComponentOrder []string
 
 	// 生命周期管理
-	mu           sync.RWMutex
-	lifecycleMu  sync.Mutex
-	initializing bool
-	stopping     bool
-	initialized  bool
-	started      bool
-	stopped      bool
+	mu                 sync.RWMutex
+	lifecycleMu        sync.Mutex
+	initializing       bool
+	stopping           bool
+	initialized        bool
+	started            bool
+	stopped            bool
+	tracingInitialized bool
 }
 
 // FrameworkConfig 框架配置（内部使用）
@@ -397,44 +398,26 @@ func (f *Framework) Start() error {
 	f.mu.Unlock()
 
 	ctx := context.Background()
-	var cleanup []func()
-	startedComponents := make([]Component, 0, len(components))
-	startFailed := func(format string, args ...interface{}) error {
-		for i := len(startedComponents) - 1; i >= 0; i-- {
-			component := startedComponents[i]
-			if err := component.Stop(ctx); err != nil {
-				logger.Error(ctx, "Failed to rollback component %s after start failure: %v", component.Name(), err)
-			}
+	startFailed := func(startErr error) error {
+		if rollbackErr := f.stop(ctx, false); rollbackErr != nil {
+			return errors.Join(startErr, fmt.Errorf("rollback framework after start failure: %w", rollbackErr))
 		}
-		for i := len(cleanup) - 1; i >= 0; i-- {
-			cleanup[i]()
-		}
-		return fmt.Errorf(format, args...)
+		return startErr
 	}
 
 	// 1. 启动 gRPC Server
 	if grpcServer != nil {
 		if err := grpcServer.Start(); err != nil {
-			return fmt.Errorf("failed to start grpc server: %w", err)
+			return startFailed(fmt.Errorf("failed to start grpc server: %w", err))
 		}
-		cleanup = append(cleanup, func() {
-			if err := grpcServer.Stop(); err != nil {
-				logger.Error(ctx, "Failed to rollback grpc server after start failure: %v", err)
-			}
-		})
 		logger.Info(ctx, "gRPC server started")
 	}
 
 	// 2. 启动 HTTP Server
 	if httpServer != nil {
 		if err := httpServer.StartAsync(); err != nil {
-			return startFailed("failed to start http server: %w", err)
+			return startFailed(fmt.Errorf("failed to start http server: %w", err))
 		}
-		cleanup = append(cleanup, func() {
-			if err := httpServer.Stop(); err != nil {
-				logger.Error(ctx, "Failed to rollback http server after start failure: %v", err)
-			}
-		})
 		logger.Info(ctx, "HTTP server started")
 	}
 
@@ -442,16 +425,15 @@ func (f *Framework) Start() error {
 	for _, component := range components {
 		if component != nil && component.IsEnabled() {
 			if err := component.Start(ctx); err != nil {
-				return startFailed("failed to start component %s: %w", component.Name(), err)
+				return startFailed(fmt.Errorf("failed to start component %s: %w", component.Name(), err))
 			}
-			startedComponents = append(startedComponents, component)
 		}
 	}
 
 	f.mu.Lock()
 	if f.started {
 		f.mu.Unlock()
-		return startFailed("framework already started")
+		return startFailed(errors.New("framework already started"))
 	}
 	f.started = true
 	f.mu.Unlock()
@@ -488,7 +470,7 @@ func (f *Framework) stop(ctx context.Context, logStopped bool) error {
 		f.mu.Unlock()
 		return nil
 	}
-	components := f.initializedComponentsLocked()
+	components := f.initializedComponentEntriesLocked()
 	httpServer := f.httpServer
 	grpcServer := f.grpcServer
 	grpcClientMgr := f.grpcClientMgr
@@ -496,22 +478,8 @@ func (f *Framework) stop(ctx context.Context, logStopped bool) error {
 	mongodbManager := f.mongodbManager
 	gormManager := f.gormManager
 	frameworkLogger := f.logger
-	traceEnabled := f.config.Tracing != nil && f.config.Tracing.Enabled
-
-	f.httpServer = nil
-	f.grpcServer = nil
-	f.grpcClientMgr = nil
-	f.redisManager = nil
-	f.mongodbManager = nil
-	f.gormManager = nil
-	f.logger = nil
-	f.metrics = nil
-	f.started = false
-	f.initializing = false
-	f.initialized = false
-	f.initializedComponentOrder = nil
+	traceEnabled := f.tracingInitialized
 	f.stopping = true
-	f.stopped = true
 	f.mu.Unlock()
 	defer func() {
 		f.mu.Lock()
@@ -524,68 +492,91 @@ func (f *Framework) stop(ctx context.Context, logStopped bool) error {
 	// 按相反顺序停止组件
 
 	// 1. 停止自定义组件
+	failedComponents := make(map[string]struct{})
 	for i := len(components) - 1; i >= 0; i-- {
-		component := components[i]
+		entry := components[i]
+		component := entry.component
 		if component != nil {
 			if err := component.Stop(ctx); err != nil {
 				logger.Error(ctx, "Failed to stop component %s: %v", component.Name(), err)
 				errs = append(errs, fmt.Errorf("component %s: %w", component.Name(), err))
+				failedComponents[entry.name] = struct{}{}
 			}
 		}
 	}
 
 	// 2. 停止 HTTP Server
+	httpServerClosed := httpServer == nil
 	if httpServer != nil {
 		if err := httpServer.Stop(); err != nil {
 			logger.Error(ctx, "Failed to stop http server: %v", err)
 			errs = append(errs, fmt.Errorf("http server: %w", err))
+		} else {
+			httpServerClosed = true
 		}
 	}
 
 	// 3. 停止 gRPC Server
+	grpcServerClosed := grpcServer == nil
 	if grpcServer != nil {
 		if err := grpcServer.Stop(); err != nil {
 			logger.Error(ctx, "Failed to stop grpc server: %v", err)
 			errs = append(errs, fmt.Errorf("grpc server: %w", err))
+		} else {
+			grpcServerClosed = true
 		}
 	}
 
 	// 4. 关闭 gRPC Client Manager
+	grpcClientMgrClosed := grpcClientMgr == nil
 	if grpcClientMgr != nil {
 		if err := grpcClientMgr.CloseAll(); err != nil {
 			logger.Error(ctx, "Failed to close grpc client manager: %v", err)
 			errs = append(errs, fmt.Errorf("grpc client manager: %w", err))
+		} else {
+			grpcClientMgrClosed = true
 		}
 	}
 
 	// 5. 关闭数据库连接
+	redisManagerClosed := redisManager == nil
 	if redisManager != nil {
 		if err := redisManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close redis manager: %v", err)
 			errs = append(errs, fmt.Errorf("redis manager: %w", err))
+		} else {
+			redisManagerClosed = true
 		}
 	}
 
+	mongodbManagerClosed := mongodbManager == nil
 	if mongodbManager != nil {
 		if err := mongodbManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close mongodb manager: %v", err)
 			errs = append(errs, fmt.Errorf("mongodb manager: %w", err))
+		} else {
+			mongodbManagerClosed = true
 		}
 	}
 
+	gormManagerClosed := gormManager == nil
 	if gormManager != nil {
 		if err := gormManager.Close(); err != nil {
 			logger.Error(ctx, "Failed to close gorm manager: %v", err)
 			errs = append(errs, fmt.Errorf("gorm manager: %w", err))
+		} else {
+			gormManagerClosed = true
 		}
 	}
 
 	// 关闭链路追踪
+	tracingClosed := !traceEnabled
 	if traceEnabled {
 		if err := tracing.Shutdown(ctx); err != nil {
 			logger.Error(ctx, "Failed to shutdown tracing: %v", err)
 			errs = append(errs, fmt.Errorf("tracing: %w", err))
 		} else {
+			tracingClosed = true
 			logger.Info(ctx, "Tracing shutdown successfully")
 		}
 	}
@@ -593,11 +584,63 @@ func (f *Framework) stop(ctx context.Context, logStopped bool) error {
 	if logStopped {
 		logger.Info(ctx, "Framework stopped")
 	}
+	loggerClosed := frameworkLogger == nil
 	if frameworkLogger != nil {
-		if err := frameworkLogger.Close(); err != nil {
+		closedGlobal, err := logger.CloseIfDefault(frameworkLogger)
+		if !closedGlobal {
+			err = frameworkLogger.Close()
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("logger: %w", err))
+		} else {
+			loggerClosed = true
 		}
 	}
+
+	f.mu.Lock()
+	if httpServerClosed {
+		f.httpServer = nil
+	}
+	if grpcServerClosed {
+		f.grpcServer = nil
+	}
+	if grpcClientMgrClosed {
+		f.grpcClientMgr = nil
+	}
+	if redisManagerClosed {
+		f.redisManager = nil
+	}
+	if mongodbManagerClosed {
+		f.mongodbManager = nil
+	}
+	if gormManagerClosed {
+		f.gormManager = nil
+	}
+	if loggerClosed {
+		f.logger = nil
+	}
+	if tracingClosed {
+		f.tracingInitialized = false
+	}
+	f.started = false
+	f.initializing = false
+	if len(errs) == 0 {
+		f.initialized = false
+		f.initializedComponentOrder = nil
+		f.metrics = nil
+		f.stopped = true
+	} else {
+		remaining := make([]string, 0, len(failedComponents))
+		for _, entry := range components {
+			if _, failed := failedComponents[entry.name]; failed {
+				remaining = append(remaining, entry.name)
+			}
+		}
+		f.initializedComponentOrder = remaining
+		f.initialized = true
+		f.stopped = false
+	}
+	f.mu.Unlock()
 	if len(errs) > 0 {
 		return fmt.Errorf("framework stopped with errors: %w", errors.Join(errs...))
 	}
@@ -608,6 +651,7 @@ func (f *Framework) stop(ctx context.Context, logStopped bool) error {
 func (f *Framework) Wait() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 	<-sigChan
 
 	logger.Info(context.Background(), "Received shutdown signal, stopping framework...")
@@ -661,17 +705,21 @@ func (f *Framework) componentsSnapshot() []componentEntry {
 	return components
 }
 
-func (f *Framework) initializedComponents() []Component {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return f.initializedComponentsLocked()
-}
-
 func (f *Framework) initializedComponentsLocked() []Component {
 	components := make([]Component, 0, len(f.initializedComponentOrder))
 	for _, name := range f.initializedComponentOrder {
 		if component := f.components[name]; component != nil {
 			components = append(components, component)
+		}
+	}
+	return components
+}
+
+func (f *Framework) initializedComponentEntriesLocked() []componentEntry {
+	components := make([]componentEntry, 0, len(f.initializedComponentOrder))
+	for _, name := range f.initializedComponentOrder {
+		if component := f.components[name]; component != nil {
+			components = append(components, componentEntry{name: name, component: component})
 		}
 	}
 	return components
@@ -938,6 +986,9 @@ func (f *Framework) initTracing(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize tracing: %w", err)
 	}
 	f.config.Tracing = &cfg
+	f.mu.Lock()
+	f.tracingInitialized = cfg.Enabled
+	f.mu.Unlock()
 
 	logger.Info(ctx, "Tracing initialized: service=%s, version=%s, environment=%s, otlp_enabled=%v, otlp_endpoint=%s",
 		cfg.ServiceName,

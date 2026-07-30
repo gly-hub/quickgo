@@ -34,7 +34,7 @@ const (
 )
 
 // 支持的配置格式
-var supportedFormats = []string{ConfigFormatJSON, ConfigFormatYAML, ConfigFormatTOML, ConfigFormatINI}
+var supportedFormats = []string{ConfigFormatJSON, ConfigFormatYAML, "yml", ConfigFormatTOML, ConfigFormatINI}
 
 // ConfigLoader 配置加载器
 type ConfigLoader struct {
@@ -116,8 +116,8 @@ func (l *ConfigLoader) Load(configs ...interface{}) error {
 			return fmt.Errorf("config[%d] is nil", i)
 		}
 
-		// 配置 mapstructure 使用对应格式的标签
-		// 这样结构体的标签就能正确匹配配置文件的键名
+		// 配置 mapstructure 使用对应格式的标签，并保持历史上的宽松
+		// 未使用字段处理，以支持只声明部分配置的结构体。
 		decoderConfig := &mapstructure.DecoderConfig{
 			Metadata:         nil,
 			Result:           cfg,
@@ -169,7 +169,7 @@ func (l *ConfigLoader) LoadKey(key string, cfg interface{}) error {
 	// 根据配置文件格式确定使用的标签名
 	tagName := l.getTagNameForFormat()
 
-	// 配置 mapstructure 使用对应格式的标签
+	// 配置 mapstructure 使用对应格式的标签，并允许同一段配置包含未声明字段。
 	decoderConfig := &mapstructure.DecoderConfig{
 		Metadata:         nil,
 		Result:           cfg,
@@ -351,6 +351,8 @@ func detectConfigFormat(configPath, configName string) (string, error) {
 		return "", fmt.Errorf("failed to read config directory: %w", err)
 	}
 
+	matches := make([]string, 0, 1)
+	format := ""
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -367,11 +369,23 @@ func detectConfigFormat(configPath, configName string) (string, error) {
 		// 检查文件名是否匹配（不含扩展名）
 		nameWithoutExt := strings.TrimSuffix(name, filepath.Ext(name))
 		if nameWithoutExt == configName {
-			return ext, nil
+			matches = append(matches, name)
+			if ext == "yml" {
+				format = ConfigFormatYAML
+			} else {
+				format = ext
+			}
 		}
 	}
 
-	return "", fmt.Errorf("config file not found: %s (supported formats: %v)", configName, supportedFormats)
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("config file not found: %s (supported formats: %v)", configName, supportedFormats)
+	case 1:
+		return format, nil
+	default:
+		return "", fmt.Errorf("multiple config files found for %s: %s", configName, strings.Join(matches, ", "))
+	}
 }
 
 // contains 检查切片是否包含指定元素

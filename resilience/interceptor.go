@@ -2,6 +2,9 @@ package resilience
 
 import (
 	"context"
+	"errors"
+	"io"
+	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -50,13 +53,69 @@ func StreamClientCircuitBreaker(manager *CircuitBreakerManager) grpc.StreamClien
 
 		stream, err := streamer(ctx, desc, cc, method, opts...)
 		if err != nil {
-			cb.RecordFailure()
+			recordCircuitResult(cb, err)
 			return nil, err
 		}
 
-		cb.RecordSuccess()
-		return stream, nil
+		return &circuitBreakingClientStream{
+			ClientStream:  stream,
+			cb:            cb,
+			serverStreams: desc != nil && desc.ServerStreams,
+		}, nil
 	}
+}
+
+type circuitBreakingClientStream struct {
+	grpc.ClientStream
+	cb            *CircuitBreaker
+	serverStreams bool
+	once          sync.Once
+}
+
+func (s *circuitBreakingClientStream) SendMsg(message interface{}) error {
+	err := s.ClientStream.SendMsg(message)
+	if err != nil {
+		s.recordResult(err)
+	}
+	return err
+}
+
+func (s *circuitBreakingClientStream) RecvMsg(message interface{}) error {
+	err := s.ClientStream.RecvMsg(message)
+	if errors.Is(err, io.EOF) {
+		s.recordSuccess()
+	} else if err != nil {
+		s.recordResult(err)
+	} else if !s.serverStreams {
+		// A client-streaming RPC returns its single terminal response without a
+		// subsequent EOF read in generated CloseAndRecv helpers.
+		s.recordSuccess()
+	}
+	return err
+}
+
+func (s *circuitBreakingClientStream) CloseSend() error {
+	err := s.ClientStream.CloseSend()
+	if err != nil {
+		s.recordResult(err)
+	}
+	return err
+}
+
+func (s *circuitBreakingClientStream) recordSuccess() {
+	s.once.Do(func() { s.cb.RecordSuccess() })
+}
+
+func (s *circuitBreakingClientStream) recordResult(err error) {
+	s.once.Do(func() { recordCircuitResult(s.cb, err) })
+}
+
+func recordCircuitResult(cb *CircuitBreaker, err error) {
+	if cb.isFailure(err) {
+		cb.RecordFailure()
+		return
+	}
+	cb.RecordSuccess()
 }
 
 // StreamServerRateLimiter gRPC 流式服务端限流拦截器

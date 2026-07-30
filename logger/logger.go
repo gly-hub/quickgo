@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,6 +50,7 @@ type Logger struct {
 	version    string
 	fields     map[string]interface{}
 	callerSkip int
+	mu         *sync.RWMutex
 }
 
 // Config 日志配置
@@ -84,6 +86,7 @@ func NewLogger(config Config) (*Logger, error) {
 		version:    config.Version,
 		fields:     make(map[string]interface{}),
 		callerSkip: config.CallerSkip,
+		mu:         &sync.RWMutex{},
 	}
 
 	// 设置输出
@@ -132,6 +135,9 @@ func (l *Logger) WithContext(ctx context.Context) *Logger {
 
 // log 内部日志方法
 func (l *Logger) log(ctx context.Context, level Level, msg string, err error, fields map[string]interface{}) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
 	if level < l.level {
 		return
 	}
@@ -347,18 +353,28 @@ func countFormatVerbs(format string) int {
 
 // SetLevel 设置日志级别
 func (l *Logger) SetLevel(level Level) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.level = level
 }
 
 // GetLevel 获取日志级别
 func (l *Logger) GetLevel() Level {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.level
 }
 
 // Close 关闭日志记录器
 func (l *Logger) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.output != nil && l.output != os.Stdout && l.output != os.Stderr {
-		return l.output.Close()
+		err := l.output.Close()
+		if errors.Is(err, os.ErrClosed) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }

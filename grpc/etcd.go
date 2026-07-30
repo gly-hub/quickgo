@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -22,6 +23,8 @@ const (
 	DefaultEtcdTTL = 30
 )
 
+var errNoServiceAddresses = errors.New("no addresses found")
+
 // EtcdConfig etcd 配置
 type EtcdConfig struct {
 	Endpoints   []string      // etcd 端点列表
@@ -37,15 +40,10 @@ type EtcdResolver struct {
 	client     *clientv3.Client
 	prefix     string
 	key        string
-	watchers   map[string]watcherEntry
+	watchers   map[uint64]context.CancelFunc
 	watcherSeq uint64
 	mu         sync.RWMutex
 	closed     bool
-}
-
-type watcherEntry struct {
-	id     uint64
-	cancel context.CancelFunc
 }
 
 // NewEtcdResolver 创建 etcd 服务发现
@@ -81,7 +79,7 @@ func NewEtcdResolver(config EtcdConfig) (*EtcdResolver, error) {
 		client:   client,
 		prefix:   config.Prefix,
 		key:      etcdConfigKey(config),
-		watchers: make(map[string]watcherEntry),
+		watchers: make(map[uint64]context.CancelFunc),
 	}, nil
 }
 
@@ -94,7 +92,15 @@ func (r *EtcdResolver) DiscoveryKey() string {
 func (r *EtcdResolver) Resolve(ctx context.Context, serviceName string) ([]string, error) {
 	key := path.Join(r.prefix, serviceName)
 
-	resp, err := r.client.Get(ctx, key, clientv3.WithPrefix())
+	r.mu.RLock()
+	client := r.client
+	closed := r.closed
+	r.mu.RUnlock()
+	if closed || client == nil {
+		return nil, fmt.Errorf("etcd resolver is closed")
+	}
+
+	resp, err := client.Get(ctx, key, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get service from etcd: %w", err)
 	}
@@ -116,7 +122,7 @@ func (r *EtcdResolver) Resolve(ctx context.Context, serviceName string) ([]strin
 	}
 
 	if len(addresses) == 0 {
-		return nil, fmt.Errorf("no addresses found for service: %s", serviceName)
+		return nil, fmt.Errorf("%w for service: %s", errNoServiceAddresses, serviceName)
 	}
 
 	return addresses, nil
@@ -124,55 +130,101 @@ func (r *EtcdResolver) Resolve(ctx context.Context, serviceName string) ([]strin
 
 // Watch 监听服务变化
 func (r *EtcdResolver) Watch(ctx context.Context, serviceName string, callback func([]string)) error {
+	return r.watch(ctx, serviceName, callback, false)
+}
+
+// watchUntilDone waits until the underlying etcd watch ends. It preserves the
+// asynchronous Watch API for existing callers while allowing the gRPC resolver
+// to recreate a watch after compaction or a broken watch stream.
+func (r *EtcdResolver) watchUntilDone(ctx context.Context, serviceName string, callback func([]string)) error {
+	return r.watch(ctx, serviceName, callback, true)
+}
+
+func (r *EtcdResolver) watch(ctx context.Context, serviceName string, callback func([]string), wait bool) error {
+	if callback == nil {
+		return fmt.Errorf("etcd watch callback is nil")
+	}
+
 	key := path.Join(r.prefix, serviceName)
 
 	r.mu.Lock()
-	// 如果已经有 watcher，先取消
-	if watcher, ok := r.watchers[serviceName]; ok {
-		watcher.cancel()
+	if r.closed || r.client == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("etcd resolver is closed")
 	}
-
 	watchCtx, cancel := context.WithCancel(ctx)
 	r.watcherSeq++
 	watcherID := r.watcherSeq
-	r.watchers[serviceName] = watcherEntry{id: watcherID, cancel: cancel}
+	r.watchers[watcherID] = cancel
+	client := r.client
 	r.mu.Unlock()
+	cleanup := func() {
+		r.mu.Lock()
+		delete(r.watchers, watcherID)
+		r.mu.Unlock()
+	}
 
 	// 首次获取
 	addresses, err := r.Resolve(watchCtx, serviceName)
-	if err == nil {
-		callback(addresses)
+	if err != nil {
+		if !wait || !errors.Is(err, errNoServiceAddresses) {
+			cancel()
+			cleanup()
+			return err
+		}
+		addresses = nil
 	}
+	callback(addresses)
 
 	// 监听变化
-	watchChan := r.client.Watch(watchCtx, key, clientv3.WithPrefix())
-
-	go func() {
-		defer func() {
-			r.mu.Lock()
-			if watcher, ok := r.watchers[serviceName]; ok && watcher.id == watcherID {
-				delete(r.watchers, serviceName)
-			}
-			r.mu.Unlock()
-		}()
+	watchChan := client.Watch(watchCtx, key, clientv3.WithPrefix())
+	done := make(chan error, 1)
+	watchLoop := func() {
+		defer cleanup()
 		for {
 			select {
 			case <-watchCtx.Done():
+				done <- watchCtx.Err()
 				return
 			case watchResp, ok := <-watchChan:
 				if !ok {
+					done <- fmt.Errorf("etcd watch channel closed for service: %s", serviceName)
 					return
 				}
 				if watchResp.Canceled {
+					if watchErr := watchResp.Err(); watchErr != nil {
+						done <- fmt.Errorf("etcd watch canceled for service %s: %w", serviceName, watchErr)
+					} else {
+						done <- fmt.Errorf("etcd watch canceled for service: %s", serviceName)
+					}
 					return
 				}
 
 				// 重新解析服务地址
 				addresses, err := r.Resolve(watchCtx, serviceName)
-				if err == nil {
-					callback(addresses)
+				if err != nil {
+					if errors.Is(err, errNoServiceAddresses) {
+						callback(nil)
+						continue
+					}
+					done <- fmt.Errorf("resolve service after etcd watch event: %w", err)
+					return
 				}
+				callback(addresses)
 			}
+		}
+	}
+
+	if wait {
+		watchLoop()
+		return <-done
+	}
+	go func() {
+		if err := func() error {
+			watchLoop()
+			return <-done
+		}(); err != nil && ctx.Err() == nil {
+			logger.Warn(context.Background(), "Etcd watch ended: service=%s, error=%v", serviceName, err)
 		}
 	}()
 
@@ -182,22 +234,23 @@ func (r *EtcdResolver) Watch(ctx context.Context, serviceName string, callback f
 // Close 关闭服务发现
 func (r *EtcdResolver) Close() error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return nil
 	}
 	r.closed = true
 
 	// 取消所有 watcher
-	for _, watcher := range r.watchers {
-		watcher.cancel()
+	for _, cancel := range r.watchers {
+		cancel()
 	}
-	r.watchers = make(map[string]watcherEntry)
+	r.watchers = make(map[uint64]context.CancelFunc)
+	client := r.client
+	r.client = nil
+	r.mu.Unlock()
 
-	if r.client != nil {
-		err := r.client.Close()
-		r.client = nil
-		return err
+	if client != nil {
+		return client.Close()
 	}
 	return nil
 }
