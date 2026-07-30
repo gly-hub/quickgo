@@ -12,9 +12,11 @@ proto:
 	@protoc -I../../../ -I$(PROTO_DIR) \
 		--go_out=$(GEN_DIR) \
 		--go_opt=paths=source_relative \
+		--go_opt=Mgrpcep/lib.proto=github.com/team-dandelion/quickgo/grpcep \
 		--go_opt=Mapi/proto/auth.proto=github.com/team-dandelion/quickgo/example/framework/auth-server/api/proto/gen \
 		--go-grpc_out=$(GEN_DIR) \
 		--go-grpc_opt=paths=source_relative \
+		--go-grpc_opt=Mgrpcep/lib.proto=github.com/team-dandelion/quickgo/grpcep \
 		$(PROTO_FILE)
 	@echo "Proto code generated successfully!"
 
@@ -35,4 +37,3 @@ clean:
 	@rm -rf $(GEN_DIR)
 	@rm -rf bin
 	@echo "Clean completed!"
-

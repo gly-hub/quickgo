@@ -6,6 +6,7 @@
 
 ```
 example/framework/
+├── go.mod                # 示例模块定义
 ├── auth-server/          # 认证服务（gRPC 服务）
 │   ├── cmd/
 │   │   └── server/       # 服务入口

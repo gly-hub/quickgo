@@ -1,2 +1,2 @@
 proto:
-	protoc --gogofaster_out=plugins=grpc:. *.proto
+	protoc --go_out=paths=source_relative:. *.proto
