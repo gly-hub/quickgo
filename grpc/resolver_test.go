@@ -2,8 +2,12 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc/resolver"
 )
 
 type closeCountingDiscovery struct {
@@ -129,4 +133,277 @@ func TestClientConcurrentCloseAndReads(t *testing.T) {
 		_ = client.Close()
 	}()
 	wg.Wait()
+}
+
+type resolverTestClientConn struct {
+	resolver.ClientConn
+	mu     sync.Mutex
+	states []resolver.State
+	errors []error
+}
+
+func (c *resolverTestClientConn) UpdateState(state resolver.State) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.states = append(c.states, state)
+	return nil
+}
+
+func (c *resolverTestClientConn) ReportError(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.errors = append(c.errors, err)
+}
+
+type blockingWatchDiscovery struct {
+	watchStarted chan struct{}
+}
+
+func (d *blockingWatchDiscovery) Resolve(context.Context, string) ([]string, error) {
+	return []string{"127.0.0.1:9001"}, nil
+}
+
+func (d *blockingWatchDiscovery) Watch(ctx context.Context, serviceName string, callback func([]string)) error {
+	select {
+	case d.watchStarted <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (d *blockingWatchDiscovery) Close() error {
+	return nil
+}
+
+func TestServiceResolverCloseCancelsWatch(t *testing.T) {
+	discovery := &blockingWatchDiscovery{watchStarted: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolver := &serviceResolver{
+		cc:          &resolverTestClientConn{},
+		sd:          discovery,
+		ctx:         ctx,
+		cancel:      cancel,
+		serviceName: "orders",
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resolver.start()
+	}()
+
+	select {
+	case <-discovery.watchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not start service watch")
+	}
+	resolver.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("resolver start did not stop after Close")
+	}
+}
+
+func TestServiceResolverClearsStateWhenNoAddressesRemain(t *testing.T) {
+	cc := &resolverTestClientConn{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolver := &serviceResolver{
+		cc:          cc,
+		ctx:         ctx,
+		cancel:      cancel,
+		serviceName: "orders",
+	}
+
+	resolver.updateState([]string{"127.0.0.1:9001"})
+	resolver.updateState(nil)
+
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if len(cc.states) != 2 {
+		t.Fatalf("expected two resolver updates, got %d", len(cc.states))
+	}
+	if len(cc.states[1].Addresses) != 0 {
+		t.Fatalf("expected empty resolver state, got %#v", cc.states[1].Addresses)
+	}
+}
+
+type restartingWatchDiscovery struct {
+	mu          sync.Mutex
+	watchCalls  int
+	secondWatch chan struct{}
+}
+
+func (d *restartingWatchDiscovery) Resolve(context.Context, string) ([]string, error) {
+	return []string{"127.0.0.1:9001"}, nil
+}
+
+func (d *restartingWatchDiscovery) Watch(context.Context, string, func([]string)) error {
+	return errors.New("unexpected asynchronous watch call")
+}
+
+func (d *restartingWatchDiscovery) watchUntilDone(ctx context.Context, _ string, callback func([]string)) error {
+	d.mu.Lock()
+	d.watchCalls++
+	call := d.watchCalls
+	d.mu.Unlock()
+
+	if call == 1 {
+		return errors.New("watch terminated")
+	}
+	callback([]string{"127.0.0.1:9002"})
+	select {
+	case d.secondWatch <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (d *restartingWatchDiscovery) Close() error { return nil }
+
+func TestServiceResolverRestartsLifecycleWatch(t *testing.T) {
+	cc := &resolverTestClientConn{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	discovery := &restartingWatchDiscovery{secondWatch: make(chan struct{}, 1)}
+	r := &serviceResolver{
+		cc:          cc,
+		sd:          discovery,
+		ctx:         ctx,
+		cancel:      cancel,
+		serviceName: "orders",
+		retryDelay:  time.Millisecond,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.start()
+	}()
+
+	select {
+	case <-discovery.secondWatch:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not restart its lifecycle watch")
+	}
+	r.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not stop after Close")
+	}
+
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if len(cc.errors) == 0 {
+		t.Fatal("expected terminated watch to be reported")
+	}
+	if len(cc.states) == 0 || len(cc.states[len(cc.states)-1].Addresses) != 1 || cc.states[len(cc.states)-1].Addresses[0].Addr != "127.0.0.1:9002" {
+		t.Fatalf("expected restarted watch address update, got %#v", cc.states)
+	}
+}
+
+type emptyAddressWatchDiscovery struct {
+	watchStarted chan struct{}
+}
+
+func (d *emptyAddressWatchDiscovery) Resolve(context.Context, string) ([]string, error) {
+	return []string{"127.0.0.1:9001"}, nil
+}
+
+func (d *emptyAddressWatchDiscovery) Watch(context.Context, string, func([]string)) error {
+	return errors.New("unexpected asynchronous watch call")
+}
+
+func (d *emptyAddressWatchDiscovery) watchUntilDone(ctx context.Context, _ string, callback func([]string)) error {
+	callback(nil)
+	select {
+	case d.watchStarted <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (d *emptyAddressWatchDiscovery) Close() error { return nil }
+
+func TestServiceResolverClearsStateAfterLifecycleWatchReportsNoAddresses(t *testing.T) {
+	cc := &resolverTestClientConn{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &serviceResolver{
+		cc:          cc,
+		sd:          &emptyAddressWatchDiscovery{watchStarted: make(chan struct{}, 1)},
+		ctx:         ctx,
+		cancel:      cancel,
+		serviceName: "orders",
+	}
+	discovery := r.sd.(*emptyAddressWatchDiscovery)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.start()
+	}()
+	select {
+	case <-discovery.watchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not receive the empty address update")
+	}
+	r.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not stop after Close")
+	}
+
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if len(cc.states) == 0 || len(cc.states[len(cc.states)-1].Addresses) != 0 {
+		t.Fatalf("expected resolver state to be cleared, got %#v", cc.states)
+	}
+}
+
+func TestEtcdResolverTracksConcurrentWatchersIndependently(t *testing.T) {
+	r := &EtcdResolver{watchers: make(map[uint64]context.CancelFunc)}
+	firstCtx, firstCancel := context.WithCancel(context.Background())
+	secondCtx, secondCancel := context.WithCancel(context.Background())
+	defer firstCancel()
+	defer secondCancel()
+
+	r.mu.Lock()
+	r.watcherSeq++
+	firstID := r.watcherSeq
+	r.watchers[firstID] = firstCancel
+	r.watcherSeq++
+	secondID := r.watcherSeq
+	r.watchers[secondID] = secondCancel
+	r.mu.Unlock()
+
+	select {
+	case <-firstCtx.Done():
+		t.Fatal("first watcher was canceled by registering a second watcher")
+	default:
+	}
+	select {
+	case <-secondCtx.Done():
+		t.Fatal("second watcher was canceled unexpectedly")
+	default:
+	}
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	for name, watchCtx := range map[string]context.Context{"first": firstCtx, "second": secondCtx} {
+		select {
+		case <-watchCtx.Done():
+		case <-time.After(time.Second):
+			t.Fatalf("%s watcher was not canceled by Close", name)
+		}
+	}
 }

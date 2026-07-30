@@ -116,84 +116,63 @@ func validateGRPCCallHandler(refParam reflect.Value, refHandler reflect.Value) e
 }
 
 func (b *BaseHandler) RPCStream(ctx *fiber.Ctx, param interface{}, streamFunc func(context.Context, interface{}) (interface{}, error)) error {
-	// 设置 SSE 相关的响应头
-	b.SetSSEStream(ctx)
+	if streamFunc == nil {
+		return errors.New("rpc_stream function is nil")
+	}
+
 	// 请求 gRPC 流
-	rpcCtx := b.RPCCtx(ctx)
+	rpcCtx, cancel := context.WithCancel(b.RPCCtx(ctx))
 	stream, err := streamFunc(rpcCtx, param)
 	if err != nil {
+		cancel()
 		logger.Error(ctx.Context(), "rpc_stream error: %v", err)
 		return err
 	}
-	// 获取 stream 的 Recv 和 CloseSend 方法
-	streamValue := reflect.ValueOf(stream)
-	recvMethod := streamValue.MethodByName("Recv")
-	closeSendMethod := streamValue.MethodByName("CloseSend")
-
-	// 确保流在不再需要时关闭
-	if closeSendMethod.IsValid() {
-		defer closeSendMethod.Call(nil)
+	recvMethod, closeSendMethod, err := rpcStreamMethods(stream)
+	if err != nil {
+		cancel()
+		logger.Error(ctx.Context(), "rpc_stream signature error: %v", err)
+		return err
 	}
 
+	// 设置 SSE 相关的响应头
+	b.SetSSEStream(ctx)
 	ctx.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer cancel()
+		defer callCloseSend(closeSendMethod)
+
 		// 监听 stream 流数据
 		eventId := 0
 		for {
-			if !recvMethod.IsValid() {
-				logger.Error(context.Background(), "rpc_stream receive method is invalid")
-				break
-			}
-
 			// 调用 Recv 方法获取流数据
 			results := recvMethod.Call(nil)
-			if len(results) != 2 {
-				logger.Error(context.Background(), "rpc_stream receive method return length error")
-				break
-			}
-
 			// 检查错误
-			if !results[1].IsNil() {
-				err = results[1].Interface().(error)
-				if err == io.EOF {
+			if recvErr, _ := results[1].Interface().(error); recvErr != nil {
+				if errors.Is(recvErr, io.EOF) {
 					break
 				}
-				logger.Error(context.Background(), "rpc_stream receive method return io.EOF")
+				logger.Error(context.Background(), "rpc_stream receive error: %v", recvErr)
 				break
 			}
 
 			// 获取内容并发送到客户端
-			var content string
-			// 尝试不同的方法获取内容
 			res := results[0].Interface()
-			contentValue := reflect.ValueOf(res).MethodByName("GetContent")
-			if contentValue.IsValid() {
-				content = contentValue.Call(nil)[0].String()
-			} else {
-				// 尝试直接将结果转换为JSON
-				jsonData, jsonErr := jsoniter.Marshal(res)
-				if jsonErr == nil {
-					content = string(jsonData)
-				} else {
-					content = fmt.Sprintf("%v", res)
-				}
-			}
-			// 格式化为标准EventStream格式
+			content := streamContent(res)
+			// 格式化为标准 EventStream 格式。
 			eventId++
-			sseMessage := fmt.Sprintf("id: %d\ndata: %s\n\n", eventId, content)
-			_, err = fmt.Fprint(w, sseMessage)
-			if err != nil {
-				logger.Error(context.Background(), "rpc_stream write error: %v", err)
-				break
+			sseMessage := formatSSEMessage(eventId, content)
+			if _, writeErr := fmt.Fprint(w, sseMessage); writeErr != nil {
+				logger.Error(context.Background(), "rpc_stream write error: %v", writeErr)
+				return
 			}
-			err = w.Flush()
-			if err != nil {
+			if flushErr := w.Flush(); flushErr != nil {
 				// 检查连接是否已关闭
-				if isConnectionClosed(err) {
-					logger.Info(context.Background(), "rpc_stream client disconnected: %v", err)
+				if isConnectionClosed(flushErr) {
+					logger.Info(context.Background(), "rpc_stream client disconnected: %v", flushErr)
 				} else {
-					logger.Error(context.Background(), "rpc_stream flush error: %v", err)
+					logger.Error(context.Background(), "rpc_stream flush error: %v", flushErr)
 				}
-				break
+				return
 			}
 		}
 
@@ -208,17 +187,95 @@ func (b *BaseHandler) RPCStream(ctx *fiber.Ctx, param interface{}, streamFunc fu
 			}
 			return
 		}
-		err = w.Flush()
-		if err != nil {
+		if flushErr := w.Flush(); flushErr != nil {
 			// 检查连接是否已关闭
-			if isConnectionClosed(err) {
-				logger.Info(context.Background(), "rpc_stream client disconnected on close: %v", err)
+			if isConnectionClosed(flushErr) {
+				logger.Info(context.Background(), "rpc_stream client disconnected on close: %v", flushErr)
 			} else {
-				logger.Error(context.Background(), "rpc_stream final flush error: %v", err)
+				logger.Error(context.Background(), "rpc_stream final flush error: %v", flushErr)
 			}
 		}
 	})
 	return nil
+}
+
+func formatSSEMessage(eventID int, content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+
+	var message strings.Builder
+	fmt.Fprintf(&message, "id: %d\n", eventID)
+	for _, line := range strings.Split(content, "\n") {
+		message.WriteString("data: ")
+		message.WriteString(line)
+		message.WriteByte('\n')
+	}
+	message.WriteByte('\n')
+	return message.String()
+}
+
+func rpcStreamMethods(stream interface{}) (reflect.Value, reflect.Value, error) {
+	streamValue := reflect.ValueOf(stream)
+	if !streamValue.IsValid() || isNilReflectValue(streamValue) {
+		return reflect.Value{}, reflect.Value{}, errors.New("rpc_stream is nil")
+	}
+
+	recvMethod := streamValue.MethodByName("Recv")
+	if !recvMethod.IsValid() {
+		return reflect.Value{}, reflect.Value{}, errors.New("rpc_stream must expose Recv")
+	}
+	recvType := recvMethod.Type()
+	if recvType.NumIn() != 0 || recvType.NumOut() != 2 || !recvType.Out(1).Implements(errorType) {
+		return reflect.Value{}, reflect.Value{}, errors.New("rpc_stream Recv must have signature func() (response, error)")
+	}
+
+	closeSendMethod := streamValue.MethodByName("CloseSend")
+	if closeSendMethod.IsValid() {
+		closeSendType := closeSendMethod.Type()
+		if closeSendType.NumIn() != 0 || (closeSendType.NumOut() == 1 && !closeSendType.Out(0).Implements(errorType)) || closeSendType.NumOut() > 1 {
+			return reflect.Value{}, reflect.Value{}, errors.New("rpc_stream CloseSend must have signature func() or func() error")
+		}
+	}
+	return recvMethod, closeSendMethod, nil
+}
+
+func callCloseSend(closeSendMethod reflect.Value) {
+	if !closeSendMethod.IsValid() {
+		return
+	}
+	results := closeSendMethod.Call(nil)
+	if len(results) == 1 {
+		if err, _ := results[0].Interface().(error); err != nil {
+			logger.Error(context.Background(), "rpc_stream close send error: %v", err)
+		}
+	}
+}
+
+func streamContent(response interface{}) string {
+	responseValue := reflect.ValueOf(response)
+	if responseValue.IsValid() && !isNilReflectValue(responseValue) {
+		getContent := responseValue.MethodByName("GetContent")
+		if getContent.IsValid() {
+			getContentType := getContent.Type()
+			if getContentType.NumIn() == 0 && getContentType.NumOut() == 1 && getContentType.Out(0).Kind() == reflect.String {
+				return getContent.Call(nil)[0].String()
+			}
+		}
+	}
+	jsonData, err := jsoniter.Marshal(response)
+	if err == nil {
+		return string(jsonData)
+	}
+	return fmt.Sprintf("%v", response)
+}
+
+func isNilReflectValue(value reflect.Value) bool {
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string {
@@ -345,17 +402,23 @@ func (h *BaseHandler) RPCCtx(c *fiber.Ctx) context.Context {
 		ctx = context.Background()
 	}
 
-	// 2. 收集 UserValues 并创建 gRPC metadata
-	userValues := make(map[string]string)
+	// 2. 只转发明确允许的请求头和 grpc-metadata-* Locals。
+	md, _ := metadata.FromOutgoingContext(ctx)
+	md = md.Copy()
+	for _, header := range []string{"authorization", "x-request-id", "x-trace-id"} {
+		if value := c.Get(header); value != "" {
+			md.Set(header, value)
+		}
+	}
 	if fctx := c.Context(); fctx != nil {
 		fctx.VisitUserValues(func(key []byte, value interface{}) {
-			userValues[string(key)] = cast.ToString(value)
+			metadataKey := strings.TrimPrefix(strings.ToLower(string(key)), "grpc-metadata-")
+			if metadataKey != strings.ToLower(string(key)) && validMetadataKey(metadataKey) {
+				md.Set(metadataKey, cast.ToString(value))
+			}
 		})
 	}
-
-	// 3. 将 UserValues 添加到 outgoing metadata
-	if len(userValues) > 0 {
-		md := metadata.New(userValues)
+	if len(md) > 0 {
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 
@@ -365,6 +428,19 @@ func (h *BaseHandler) RPCCtx(c *fiber.Ctx) context.Context {
 	}
 
 	return ctx
+}
+
+func validMetadataKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, char := range key {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (h *BaseHandler) ParseJson(c *fiber.Ctx, param interface{}) error {
@@ -393,10 +469,10 @@ func (h *BaseHandler) msgAndCodeParser(code int32, msg string, err error) (int32
 	var errCode int32
 	var errMsg string
 	if err != nil {
-		switch err.(type) {
+		switch typedErr := err.(type) {
 		case *gerr.GErr:
-			errCode = err.(*gerr.GErr).GetCode()
-			errMsg = err.(*gerr.GErr).GetMsg()
+			errCode = typedErr.GetCode()
+			errMsg = typedErr.GetMsg()
 		default:
 			errCode = FailCode
 			errMsg = err.Error()

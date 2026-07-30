@@ -23,6 +23,14 @@ jobs:
       - name: Go version
         run: go version && go env GOTOOLCHAIN GOROOT
 
+      - name: Module integrity
+        run: |
+          go mod tidy -diff
+          go mod verify
+
+      - name: Format
+        run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './.git/*'))"
+
       - name: Vet
         run: |
           pkgs=$(go list ./... | grep -v '/example/')
@@ -31,4 +39,23 @@ jobs:
       - name: Test
         run: |
           pkgs=$(go list ./... | grep -v '/example/')
-          go test -count=1 $pkgs
+          go test -count=1 -coverprofile=coverage.out $pkgs
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          awk -v total="$total" 'BEGIN { if (total < 20) { printf "coverage %.1f%% is below 20%%\n", total; exit 1 } }'
+
+      - name: Race
+        run: |
+          pkgs=$(go list ./... | grep -v '/example/')
+          go test -count=1 -race $pkgs
+
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          pkgs=$(go list ./... | grep -v '/example/')
+          staticcheck $pkgs
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          pkgs=$(go list ./... | grep -v '/example/')
+          govulncheck $pkgs

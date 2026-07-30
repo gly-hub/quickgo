@@ -171,6 +171,8 @@ func (cb *CircuitBreaker) Execute(ctx context.Context, fn func(context.Context) 
 	if err != nil {
 		if cb.isFailure(err) {
 			cb.RecordFailure()
+		} else {
+			cb.RecordSuccess()
 		}
 		return err
 	}

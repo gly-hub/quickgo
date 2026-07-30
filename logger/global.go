@@ -20,8 +20,12 @@ func Init(config Config) error {
 	}
 
 	defaultMu.Lock()
+	oldLogger := defaultLogger
 	defaultLogger = newLogger
 	defaultMu.Unlock()
+	if oldLogger != nil {
+		return oldLogger.Close()
+	}
 	return nil
 }
 
@@ -108,6 +112,24 @@ func Close() error {
 		return current.Close()
 	}
 	return nil
+}
+
+// CloseIfDefault closes logger only when it is still the current global logger.
+// It lets owners release a logger without closing a replacement installed by
+// another component.
+func CloseIfDefault(logger *Logger) (bool, error) {
+	defaultMu.Lock()
+	if defaultLogger != logger {
+		defaultMu.Unlock()
+		return false, nil
+	}
+	defaultLogger = nil
+	defaultMu.Unlock()
+
+	if logger == nil {
+		return true, nil
+	}
+	return true, logger.Close()
 }
 
 // MustInit 初始化全局日志记录器，失败则 panic

@@ -9,7 +9,6 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
@@ -17,7 +16,7 @@ import (
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc/credentials/insecure"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 var (
@@ -26,13 +25,17 @@ var (
 	// tp 全局 TracerProvider
 	tp *tracesdk.TracerProvider
 	mu sync.RWMutex
+	// lifecycleMu serializes global OpenTelemetry provider replacement.
+	lifecycleMu sync.Mutex
 )
 
 // Init 初始化链路追踪
 func Init(config *Config) error {
 	if config == nil || !config.Enabled {
-		return nil
+		return Shutdown(context.Background())
 	}
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
 
 	// 设置服务名称
 	serviceName := config.ServiceName
@@ -72,7 +75,11 @@ func Init(config *Config) error {
 		var err error
 		// 使用 OTLP Exporter（推荐）
 		// 解析 endpoint，提取 host:port
-		endpoint := parseOTLPEndpoint(config.OTLP.Endpoint)
+		defaultPort := "4318"
+		if config.OTLP.UseGRPC {
+			defaultPort = "4317"
+		}
+		endpoint := parseOTLPEndpoint(config.OTLP.Endpoint, defaultPort)
 
 		if config.OTLP.UseGRPC {
 			// 使用 gRPC
@@ -80,7 +87,7 @@ func Init(config *Config) error {
 				otlptracegrpc.WithEndpoint(endpoint),
 			}
 			if config.OTLP.Insecure {
-				opts = append(opts, otlptracegrpc.WithTLSCredentials(insecure.NewCredentials()))
+				opts = append(opts, otlptracegrpc.WithInsecure())
 			}
 			if len(config.OTLP.Headers) > 0 {
 				opts = append(opts, otlptracegrpc.WithHeaders(config.OTLP.Headers))
@@ -103,38 +110,7 @@ func Init(config *Config) error {
 			return fmt.Errorf("failed to create OTLP exporter (endpoint=%s, parsed=%s): %w", config.OTLP.Endpoint, endpoint, err)
 		}
 	} else if config.Jaeger.Enabled {
-		// 使用 Jaeger Exporter（已废弃，但为了兼容性保留）
-		var err error
-		if config.Jaeger.CollectorEndpoint != "" {
-			// 使用 HTTP Collector
-			opts := []jaeger.CollectorEndpointOption{
-				jaeger.WithEndpoint(config.Jaeger.CollectorEndpoint),
-			}
-			if config.Jaeger.Username != "" {
-				opts = append(opts, jaeger.WithUsername(config.Jaeger.Username))
-			}
-			if config.Jaeger.Password != "" {
-				opts = append(opts, jaeger.WithPassword(config.Jaeger.Password))
-			}
-			exporter, err = jaeger.New(jaeger.WithCollectorEndpoint(opts...))
-		} else {
-			// 使用 UDP Agent
-			agentHost := config.Jaeger.AgentHost
-			if agentHost == "" {
-				agentHost = "localhost"
-			}
-			agentPort := config.Jaeger.AgentPort
-			if agentPort == 0 {
-				agentPort = 6831
-			}
-			exporter, err = jaeger.New(jaeger.WithAgentEndpoint(jaeger.WithAgentHost(agentHost), jaeger.WithAgentPort(fmt.Sprintf("%d", agentPort))))
-			if err != nil {
-				return fmt.Errorf("failed to create Jaeger agent exporter: %w", err)
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("failed to create Jaeger exporter: %w", err)
-		}
+		return fmt.Errorf("the Jaeger exporter is no longer supported; configure Jaeger through OTLP")
 	} else {
 		// 如果未启用任何 exporter，使用 Noop Exporter（仅本地追踪，不上传）
 		// 注意：NewNoopExporter 不存在，我们使用 nil 并在后面检查
@@ -143,11 +119,15 @@ func Init(config *Config) error {
 
 	// 设置采样率
 	samplingRate := config.SamplingRate
-	if samplingRate < 0 {
+	if config.DisableSampling {
 		samplingRate = 0
+	} else if samplingRate == 0 {
+		samplingRate = 1
+	} else if samplingRate < 0 {
+		return fmt.Errorf("sampling rate must be between 0 and 1")
 	}
 	if samplingRate > 1 {
-		samplingRate = 1
+		return fmt.Errorf("sampling rate must be between 0 and 1")
 	}
 
 	// 创建 TracerProvider
@@ -191,11 +171,16 @@ func Init(config *Config) error {
 
 // Shutdown 关闭链路追踪
 func Shutdown(ctx context.Context) error {
+	lifecycleMu.Lock()
+	defer lifecycleMu.Unlock()
+
+	noopProvider := noop.NewTracerProvider()
 	mu.Lock()
 	current := tp
 	tp = nil
 	globalTracer = nil
 	mu.Unlock()
+	otel.SetTracerProvider(noopProvider)
 	if current != nil {
 		return current.Shutdown(ctx)
 	}
@@ -209,7 +194,7 @@ func GetTracer() trace.Tracer {
 	mu.RUnlock()
 	if current == nil {
 		// 如果未初始化，返回 Noop Tracer
-		return trace.NewNoopTracerProvider().Tracer("noop")
+		return noop.NewTracerProvider().Tracer("noop")
 	}
 	return current
 }
@@ -256,7 +241,7 @@ func IsEnabled() bool {
 // - http://localhost:4318
 // - https://localhost:4318
 // - localhost:4318
-func parseOTLPEndpoint(endpoint string) string {
+func parseOTLPEndpoint(endpoint, defaultPort string) string {
 	// 如果包含 scheme，解析 URL
 	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
 		u, err := url.Parse(endpoint)
@@ -267,12 +252,7 @@ func parseOTLPEndpoint(endpoint string) string {
 		host := u.Hostname()
 		port := u.Port()
 		if port == "" {
-			// 如果没有端口，根据 scheme 设置默认端口
-			if u.Scheme == "https" {
-				port = "4317" // gRPC 默认端口
-			} else {
-				port = "4318" // HTTP 默认端口
-			}
+			port = defaultPort
 		}
 		return host + ":" + port
 	}

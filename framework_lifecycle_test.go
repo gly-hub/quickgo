@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +36,7 @@ func TestFrameworkLoggerFileOutput(t *testing.T) {
 	if err := f.Init(); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	defer f.Logger().Close()
+	defer f.Stop()
 
 	f.Logger().Info(context.Background(), "framework file log")
 
@@ -46,6 +47,30 @@ func TestFrameworkLoggerFileOutput(t *testing.T) {
 	if !strings.Contains(string(content), "framework file log") {
 		t.Fatalf("expected file log content, got %s", string(content))
 	}
+}
+
+func TestFrameworkCanReinitializeWithFileLoggerAfterStop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "framework.log")
+	f, err := NewFramework(ConfigOptionWithLogger(LoggerConfig{
+		Enabled: true,
+		Level:   "info",
+		Output:  "file",
+		File:    path,
+		Service: "test-service",
+	}))
+	if err != nil {
+		t.Fatalf("NewFramework failed: %v", err)
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("first Init failed: %v", err)
+	}
+	if err := f.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("second Init failed: %v", err)
+	}
+	defer f.Stop()
 }
 
 type lifecycleTestComponent struct {
@@ -180,6 +205,74 @@ func TestFrameworkComponentStartStopOrderIsStable(t *testing.T) {
 	}
 }
 
+func TestFrameworkStartFailureFullyRollsBackAndAllowsReinit(t *testing.T) {
+	var (
+		events []string
+		mu     sync.Mutex
+	)
+	f, err := NewFramework(ConfigOptionWithLogger(LoggerConfig{Enabled: false}))
+	if err != nil {
+		t.Fatalf("NewFramework failed: %v", err)
+	}
+	first := &lifecycleTestComponent{name: "first", enabled: true, events: &events, eventsLock: &mu}
+	second := &lifecycleTestComponent{name: "second", enabled: true, startErr: errors.New("boom"), events: &events, eventsLock: &mu}
+	for _, component := range []Component{first, second} {
+		if err := f.RegisterComponent(component); err != nil {
+			t.Fatalf("RegisterComponent failed: %v", err)
+		}
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	if err := f.Start(); err == nil {
+		t.Fatal("expected Start to fail")
+	}
+	if f.initialized || f.started {
+		t.Fatal("expected failed Start to fully reset framework state")
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("expected Init after failed Start to succeed: %v", err)
+	}
+	defer f.Stop()
+}
+
+func TestFrameworkStopFailureCanBeRetriedWithoutStoppingSuccessfulComponentsAgain(t *testing.T) {
+	var (
+		events []string
+		mu     sync.Mutex
+	)
+	f, err := NewFramework(ConfigOptionWithLogger(LoggerConfig{Enabled: false}))
+	if err != nil {
+		t.Fatalf("NewFramework failed: %v", err)
+	}
+	first := &lifecycleTestComponent{name: "first", enabled: true, events: &events, eventsLock: &mu}
+	second := &lifecycleTestComponent{name: "second", enabled: true, stopErr: errors.New("temporary stop failure"), events: &events, eventsLock: &mu}
+	for _, component := range []Component{first, second} {
+		if err := f.RegisterComponent(component); err != nil {
+			t.Fatalf("RegisterComponent failed: %v", err)
+		}
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	if err := f.Stop(); err == nil {
+		t.Fatal("expected first Stop to fail")
+	}
+	if f.stopped || !f.initialized {
+		t.Fatal("expected failed Stop to retain retryable initialized state")
+	}
+
+	second.stopErr = nil
+	if err := f.Stop(); err != nil {
+		t.Fatalf("second Stop failed: %v", err)
+	}
+
+	want := []string{"init:first", "init:second", "stop:second", "stop:first", "stop:second"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("unexpected stop retry order: got %v want %v", events, want)
+	}
+}
+
 func TestFrameworkMetricsPropagateToServersWithoutMutatingInput(t *testing.T) {
 	metricsConfig := &metrics.Config{Namespace: "suite", Buckets: []float64{0.1, 0.2}}
 	httpConfig := &HTTPServerConfig{Enabled: true}
@@ -225,7 +318,7 @@ func TestFrameworkHTTPMetricsEndpointExposesSharedGRPCMetrics(t *testing.T) {
 	f, err := NewFramework(
 		ConfigOptionWithLogger(LoggerConfig{Enabled: false}),
 		ConfigOptionWithMetrics(&metrics.Config{Namespace: "suite"}),
-		ConfigOptionWithHTTPServer(&HTTPServerConfig{Enabled: true}),
+		ConfigOptionWithHTTPServer(&HTTPServerConfig{Enabled: true, EnableMetricsEndpoint: true}),
 		ConfigOptionWithGrpcServer(&GrpcServerConfig{}),
 	)
 	if err != nil {
