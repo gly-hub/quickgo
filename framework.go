@@ -93,12 +93,15 @@ type AppConfig struct {
 
 // LoggerConfig Logger 配置
 type LoggerConfig struct {
-	Enabled bool   `json:"enabled" yaml:"enabled" toml:"enabled"` // 是否启用
-	Level   string `json:"level" yaml:"level" toml:"level"`       // 日志级别：debug, info, warn, error
-	Output  string `json:"output" yaml:"output" toml:"output"`    // 输出方式：console, file
-	File    string `json:"file" yaml:"file" toml:"file"`          // 文件路径（output=file 时）
-	Service string `json:"service" yaml:"service" toml:"service"` // 服务名称
-	Version string `json:"version" yaml:"version" toml:"version"` // 服务版本
+	Enabled      bool   `json:"enabled" yaml:"enabled" toml:"enabled"`                // 是否启用
+	Level        string `json:"level" yaml:"level" toml:"level"`                      // 日志级别：debug, info, warn, error
+	Output       string `json:"output" yaml:"output" toml:"output"`                   // 输出方式：console, file
+	File         string `json:"file" yaml:"file" toml:"file"`                         // 文件路径（output=file 时）
+	Service      string `json:"service" yaml:"service" toml:"service"`                // 服务名称
+	Version      string `json:"version" yaml:"version" toml:"version"`                // 服务版本
+	EnableCaller bool   `json:"enableCaller" yaml:"enableCaller" toml:"enableCaller"` // 是否记录调用者位置，默认 false
+	Synchronous  bool   `json:"synchronous" yaml:"synchronous" toml:"synchronous"`    // 是否同步写出日志，默认 false
+	BufferSize   int    `json:"bufferSize" yaml:"bufferSize" toml:"bufferSize"`       // 异步日志队列长度，默认 1024
 }
 
 // Component 组件接口（用于扩展）
@@ -280,9 +283,10 @@ func (f *Framework) Init() error {
 			return fmt.Errorf("failed to init logger: %w", err)
 		}
 	} else {
-		// 即使未启用，也创建一个默认 logger
+		// 保持全局 logger 可用，但使用高于 Fatal 的级别实现真正静默。
 		logger.Init(logger.Config{
-			Level: logger.LevelInfo,
+			Level:         logger.LevelFatal + 1,
+			DisableCaller: true,
 		})
 		f.setLogger(logger.GetDefault())
 	}
@@ -867,9 +871,13 @@ func (f *Framework) initLogger(ctx context.Context) error {
 
 	// 构建 logger 配置
 	loggerConfig := logger.Config{
-		Level:   level,
-		Service: cfg.Service,
-		Version: cfg.Version,
+		Level:         level,
+		Service:       cfg.Service,
+		Version:       cfg.Version,
+		EnableCaller:  cfg.EnableCaller,
+		DisableCaller: !cfg.EnableCaller,
+		Async:         !cfg.Synchronous,
+		BufferSize:    cfg.BufferSize,
 	}
 
 	// 设置输出方式

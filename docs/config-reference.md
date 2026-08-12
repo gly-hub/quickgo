@@ -33,6 +33,9 @@ logger:
   file: ""              # output=file 时的路径
   service: my-service
   version: "1.0.0"
+  enableCaller: false  # true 时记录调用者文件和行号；默认关闭以降低热路径开销
+  synchronous: false   # 默认异步写出；true 时在当前请求 goroutine 写入
+  bufferSize: 1024     # 异步写出队列长度；队列满时保留背压，不丢日志
 ```
 
 对应：`quickgo.LoggerConfig` → `logger.Config`
@@ -66,6 +69,8 @@ grpcServer:
 | `keepAliveTime` / `keepAliveTimeout` | 字符串 duration |
 | `maxConnectionIdle` / `maxConnectionAge` / `maxConnectionAgeGrace` | 连接空闲、最大年龄和优雅关闭窗口；空值表示不限制 |
 | `etcd` | 非空则向 etcd 注册 |
+
+每个同时运行的 gRPC 服务节点都必须创建自己的 `grpc.NewEtcdRegistry` / `ServiceRegistrar` 实例。注册器持有该节点独立的 lease 与 keepalive 生命周期，不能在多个节点之间共享；同一服务的多个节点使用相同的服务名即可。
 
 ---
 
@@ -230,6 +235,8 @@ gorm:
 ```
 
 对应：`db/gorm.GormManagerConfig`  
+
+未配置连接池字段时，QuickGo 默认使用 `maxIdleConn=10`、`maxOpenConn=100`、`connMaxLifetime=30m`、`connMaxIdleTime=10m`；这些限制同样应用于读写分离的副本连接池。
 Docker Compose MySQL：`root` / `quickgo`，库名 `go-admin`（见根目录 `docker-compose.yml`）。
 
 PostgreSQL 自动构建 DSN 时默认 `sslmode=require`；仅在可信本地环境显式配置 `sslMode: disable`。
