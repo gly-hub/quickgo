@@ -2,6 +2,7 @@ package quickgo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -141,6 +142,64 @@ func TestGrpcClientManagerHealthCheckDoesNotCloseCachedConn(t *testing.T) {
 	if state := conn.GetState(); state == connectivity.Shutdown {
 		t.Fatalf("cached ClientConn was closed by health check")
 	}
+}
+
+func TestGrpcClientManagerGetClientFollowerHonorsOwnContext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		close(accepted)
+		<-release
+		_ = conn.Close()
+	}()
+	defer close(release)
+
+	manager, err := NewGrpcClientManager(&GrpcClientConfig{
+		Discovery: "static",
+		StaticAddresses: map[string]string{
+			"slow-service": listener.Addr().String(),
+		},
+		Timeout:             "500ms",
+		Insecure:            true,
+		HealthCheckInterval: "0",
+	})
+	if err != nil {
+		t.Fatalf("NewGrpcClientManager failed: %v", err)
+	}
+	defer manager.CloseAll()
+	if err := manager.RegisterService("slow-service"); err != nil {
+		t.Fatalf("RegisterService failed: %v", err)
+	}
+
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, leaderErr := manager.GetClient(context.Background(), "slow-service")
+		leaderDone <- leaderErr
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("leader did not start connecting")
+	}
+
+	followerCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	_, err = manager.GetClient(followerCtx, "slow-service")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected follower deadline error, got %v", err)
+	}
+
+	<-leaderDone
 }
 
 func reserveTCPPort(t *testing.T) int {

@@ -157,6 +157,28 @@ func TestNewClientWithReadReplicaKeepsSourceOpen(t *testing.T) {
 	}
 }
 
+func TestNewClientAppliesDefaultConnectionPoolLimits(t *testing.T) {
+	client, err := NewClient(&GormConfig{
+		Name: "default-pool-limits",
+		Master: MasterConfig{
+			Type:     DatabaseTypeSQLite,
+			Database: filepath.Join(t.TempDir(), "default-pool.db"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	sqlDB, err := client.GetDB().DB()
+	if err != nil {
+		t.Fatalf("DB failed: %v", err)
+	}
+	if got := sqlDB.Stats().MaxOpenConnections; got != defaultMaxOpenConns {
+		t.Fatalf("MaxOpenConnections = %d, want %d", got, defaultMaxOpenConns)
+	}
+}
+
 func TestClientCloseClosesSourceAndReplicaPools(t *testing.T) {
 	dir := t.TempDir()
 	client, err := NewClient(&GormConfig{
@@ -186,6 +208,11 @@ func TestClientCloseClosesSourceAndReplicaPools(t *testing.T) {
 	}
 	if len(pools) < 2 {
 		t.Fatalf("expected source and replica pools, got %d", len(pools))
+	}
+	for _, pool := range pools {
+		if got := pool.Stats().MaxOpenConnections; got != defaultMaxOpenConns {
+			t.Fatalf("replica pool MaxOpenConnections = %d, want %d", got, defaultMaxOpenConns)
+		}
 	}
 
 	if err := client.Close(); err != nil {

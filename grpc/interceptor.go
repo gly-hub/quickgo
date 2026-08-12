@@ -48,9 +48,6 @@ func LoggingInterceptor() grpc.UnaryServerInterceptor {
 		// 从 context 中提取或创建链路信息（如果没有从 metadata 获取到，则创建新的）
 		ctx = logger.StartSpan(ctx)
 
-		// 记录请求信息
-		logger.Info(ctx, "gRPC call: method=%s", info.FullMethod)
-
 		// 执行处理
 		resp, err := handler(ctx, req)
 
@@ -167,9 +164,6 @@ func StreamLoggingInterceptor() grpc.StreamServerInterceptor {
 		// 从 context 中提取或创建链路信息
 		ctx = logger.StartSpan(ctx)
 
-		// 记录请求信息
-		logger.Info(ctx, "gRPC stream call: method=%s", info.FullMethod)
-
 		// 创建包装的 stream，将包含 trace ID 的 context 传递给 handler
 		wrappedStream := &wrappedServerStream{
 			ServerStream: ss,
@@ -216,9 +210,6 @@ func ClientStreamLoggingInterceptor() grpc.StreamClientInterceptor {
 			}
 			ctx = metadata.NewOutgoingContext(ctx, md)
 		}
-
-		// 记录请求信息
-		logger.Info(ctx, "gRPC client stream call: method=%s", method)
 
 		// 执行调用
 		stream, err := streamer(ctx, desc, cc, method, opts...)
@@ -268,9 +259,6 @@ func ClientLoggingInterceptor() grpc.UnaryClientInterceptor {
 			}
 			ctx = metadata.NewOutgoingContext(ctx, md)
 		}
-
-		// 记录请求信息
-		logger.Info(ctx, "gRPC client call: method=%s", method)
 
 		// 执行调用
 		err := invoker(ctx, method, req, reply, cc, opts...)

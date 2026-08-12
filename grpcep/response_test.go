@@ -1,6 +1,7 @@
 package grpcep
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -125,6 +126,42 @@ func TestWithError_NilError(t *testing.T) {
 	// 原值应该保持不变
 	if resp.CommonResp.Code != SuccessCode {
 		t.Errorf("Expected Code to remain %d, got %d", SuccessCode, resp.CommonResp.Code)
+	}
+}
+
+func TestResponseDecoratorPreservesResponseContract(t *testing.T) {
+	handler := &BaseHandler{}
+	decorated := handler.ResponseDecorator([]byte(`{"CommonResp":{"code":40001,"msg":"invalid"},"payload":{"id":123,"ok":true}}`), "trace-1")
+
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(decorated), &response); err != nil {
+		t.Fatalf("decorated response is invalid JSON: %v", err)
+	}
+	if got := string(response["code"]); got != "40001" {
+		t.Fatalf("code = %s, want 40001", got)
+	}
+	if got := string(response["msg"]); got != `"invalid"` {
+		t.Fatalf("msg = %s, want invalid", got)
+	}
+	if got := string(response["request_id"]); got != `"trace-1"` {
+		t.Fatalf("request_id = %s, want trace-1", got)
+	}
+	if got := string(response["data"]); got != `{"payload":{"id":123,"ok":true}}` {
+		t.Fatalf("data = %s, want CommonResp removed with payload retained", got)
+	}
+}
+
+func TestResponseDecoratorKeepsRawData(t *testing.T) {
+	handler := &BaseHandler{}
+	raw := []byte(`{"large":9007199254740993,"items":[1,2,3]}`)
+	decorated := handler.ResponseDecorator(raw, "trace-1")
+
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(decorated), &response); err != nil {
+		t.Fatalf("decorated response is invalid JSON: %v", err)
+	}
+	if got := string(response["data"]); got != string(raw) {
+		t.Fatalf("raw data changed: got %s, want %s", got, raw)
 	}
 }
 
@@ -292,5 +329,15 @@ func BenchmarkWithError(b *testing.B) {
 			},
 		}
 		WithError(resp, testErr)
+	}
+}
+
+func BenchmarkResponseDecorator(b *testing.B) {
+	handler := &BaseHandler{}
+	data := []byte(`{"CommonResp":{"code":20000,"msg":"success"},"payload":{"id":123,"name":"quickgo"}}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = handler.ResponseDecorator(data, "trace-1")
 	}
 }

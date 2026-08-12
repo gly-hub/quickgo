@@ -33,8 +33,8 @@ func TestNewLogger(t *testing.T) {
 		t.Errorf("Expected version '1.0.0', got '%s'", logger.version)
 	}
 
-	if logger.level != LevelDebug {
-		t.Errorf("Expected level LevelDebug, got %d", logger.level)
+	if logger.GetLevel() != LevelDebug {
+		t.Errorf("Expected level LevelDebug, got %d", logger.GetLevel())
 	}
 	logger.Debug(context.Background(), "debug msg")
 }
@@ -245,6 +245,75 @@ func TestWithField(t *testing.T) {
 	}
 }
 
+func TestWithContextDoesNotDuplicateTraceFields(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "logger.log")
+	logger, err := NewLogger(Config{Level: LevelInfo, Output: tmpFile})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	ctx := WithTrace(context.Background(), "trace-123", "span-456")
+	boundLogger := logger.WithContext(ctx)
+	if boundLogger == logger {
+		t.Fatal("WithContext should bind the provided trace context")
+	}
+	boundLogger.Info(context.Background(), "test message")
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	var entry LogEntry
+	if err := json.Unmarshal(content, &entry); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if entry.TraceID != "trace-123" || entry.SpanID != "span-456" {
+		t.Fatalf("unexpected trace context: trace=%q span=%q", entry.TraceID, entry.SpanID)
+	}
+	if len(entry.Fields) != 0 {
+		t.Fatalf("trace fields should not be duplicated in fields: %#v", entry.Fields)
+	}
+}
+
+func TestWithFieldsTracksLevelChanges(t *testing.T) {
+	logger, err := NewLogger(Config{Level: LevelInfo})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	fieldLogger := logger.WithField("component", "test")
+	logger.SetLevel(LevelError)
+	if got := fieldLogger.GetLevel(); got != LevelError {
+		t.Fatalf("derived logger level = %d, want %d", got, LevelError)
+	}
+}
+
+func TestAsyncLoggerFlushAndClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logger.log")
+	logger, err := NewLogger(Config{Level: LevelInfo, Output: path, Async: true, BufferSize: 1})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	logger.Info(context.Background(), "first message")
+	logger.Info(context.Background(), "second message")
+	if err := logger.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if !strings.Contains(string(content), "first message") || !strings.Contains(string(content), "second message") {
+		t.Fatalf("flush did not persist queued logs: %s", content)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+}
+
 // TestErrorLog 测试错误日志
 func TestErrorLog(t *testing.T) {
 	tmpFile, _ := os.CreateTemp("", "logger_test_*.log")
@@ -411,8 +480,9 @@ func TestCallerInfo(t *testing.T) {
 	tmpFile.Close()
 
 	logger, _ := NewLogger(Config{
-		Level:  LevelInfo,
-		Output: tmpFile.Name(),
+		Level:        LevelInfo,
+		Output:       tmpFile.Name(),
+		EnableCaller: true,
 	})
 	defer logger.Close()
 
@@ -429,5 +499,78 @@ func TestCallerInfo(t *testing.T) {
 
 	if !strings.Contains(entry.Caller, "logger_test.go") {
 		t.Errorf("Expected caller to contain 'logger_test.go', got '%s'", entry.Caller)
+	}
+}
+
+func TestCallerDisabledByDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logger.log")
+	logger, err := NewLogger(Config{Level: LevelInfo, Output: path})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.Info(context.Background(), "test message")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	var entry LogEntry
+	if err := json.Unmarshal(content, &entry); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if entry.Caller != "" {
+		t.Fatalf("caller should be disabled by default, got %q", entry.Caller)
+	}
+}
+
+func BenchmarkDebugFiltered(b *testing.B) {
+	logger, err := NewLogger(Config{Level: LevelInfo})
+	if err != nil {
+		b.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logger.Debug(context.Background(), "user=%d route=%s", i, "/v1/orders")
+	}
+}
+
+func BenchmarkInfoAsync(b *testing.B) {
+	logger, err := NewLogger(Config{
+		Level:      LevelInfo,
+		Output:     os.DevNull,
+		Async:      true,
+		BufferSize: 4096,
+	})
+	if err != nil {
+		b.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logger.Info(context.Background(), "user=%d route=%s", i, "/v1/orders")
+	}
+	b.StopTimer()
+	if err := logger.Flush(); err != nil {
+		b.Fatalf("Flush failed: %v", err)
+	}
+}
+
+func BenchmarkInfoWithCaller(b *testing.B) {
+	logger, err := NewLogger(Config{Level: LevelInfo, Output: os.DevNull, EnableCaller: true})
+	if err != nil {
+		b.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logger.Info(context.Background(), "user=%d", i)
 	}
 }
