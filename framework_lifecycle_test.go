@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/team-dandelion/quickgo/logger"
 	"github.com/team-dandelion/quickgo/metrics"
 )
 
@@ -39,6 +40,9 @@ func TestFrameworkLoggerFileOutput(t *testing.T) {
 	defer f.Stop()
 
 	f.Logger().Info(context.Background(), "framework file log")
+	if err := f.Logger().Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
 
 	content, err := os.ReadFile(tmpFile.Name())
 	if err != nil {
@@ -46,6 +50,50 @@ func TestFrameworkLoggerFileOutput(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "framework file log") {
 		t.Fatalf("expected file log content, got %s", string(content))
+	}
+}
+
+func TestFrameworkDisabledLoggerIsSilent(t *testing.T) {
+	f, err := NewFramework(ConfigOptionWithLogger(LoggerConfig{Enabled: false}))
+	if err != nil {
+		t.Fatalf("NewFramework failed: %v", err)
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer f.Stop()
+
+	if level := f.Logger().GetLevel(); level <= logger.LevelFatal {
+		t.Fatalf("disabled logger level = %d, want a level above Fatal", level)
+	}
+}
+
+func TestFrameworkLoggerCallerIsOptIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "framework.log")
+	f, err := NewFramework(ConfigOptionWithLogger(LoggerConfig{
+		Enabled: true,
+		Level:   "info",
+		Output:  "file",
+		File:    path,
+	}))
+	if err != nil {
+		t.Fatalf("NewFramework failed: %v", err)
+	}
+	if err := f.Init(); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer f.Stop()
+
+	f.Logger().Info(context.Background(), "caller disabled by default")
+	if err := f.Logger().Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if strings.Contains(string(content), "\"caller\"") {
+		t.Fatalf("framework logger unexpectedly recorded caller: %s", content)
 	}
 }
 

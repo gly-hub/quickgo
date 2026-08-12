@@ -21,6 +21,13 @@ import (
 	"gorm.io/plugin/dbresolver"
 )
 
+const (
+	defaultMaxIdleConns    = 10
+	defaultMaxOpenConns    = 100
+	defaultConnMaxLifetime = 30 * time.Minute
+	defaultConnMaxIdleTime = 10 * time.Minute
+)
+
 // Client GORM 客户端封装
 type Client struct {
 	name      string
@@ -38,6 +45,10 @@ func NewClient(config *GormConfig) (*Client, error) {
 
 	if config.Name == "" {
 		return nil, fmt.Errorf("database name is required")
+	}
+	maxIdleConn, maxOpenConn, connMaxLifetime, connMaxIdleTime, err := resolvePoolSettings(config)
+	if err != nil {
+		return nil, err
 	}
 
 	ctx := context.Background()
@@ -66,36 +77,10 @@ func NewClient(config *GormConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to get sql.DB: %w", err)
 	}
 
-	if config.MaxIdleConn > 0 {
-		sqlDB.SetMaxIdleConns(config.MaxIdleConn)
-	}
-	if config.MaxOpenConn > 0 {
-		sqlDB.SetMaxOpenConns(config.MaxOpenConn)
-	}
-
-	// 解析并设置连接最大生存时间
-	if config.ConnMaxLifetime != "" {
-		connMaxLifetime, err := time.ParseDuration(config.ConnMaxLifetime)
-		if err != nil {
-			sqlDB.Close()
-			return nil, fmt.Errorf("failed to parse ConnMaxLifetime %s: %w", config.ConnMaxLifetime, err)
-		}
-		if connMaxLifetime > 0 {
-			sqlDB.SetConnMaxLifetime(connMaxLifetime)
-		}
-	}
-
-	// 解析并设置连接最大空闲时间
-	if config.ConnMaxIdleTime != "" {
-		connMaxIdleTime, err := time.ParseDuration(config.ConnMaxIdleTime)
-		if err != nil {
-			sqlDB.Close()
-			return nil, fmt.Errorf("failed to parse ConnMaxIdleTime %s: %w", config.ConnMaxIdleTime, err)
-		}
-		if connMaxIdleTime > 0 {
-			sqlDB.SetConnMaxIdleTime(connMaxIdleTime)
-		}
-	}
+	sqlDB.SetMaxIdleConns(maxIdleConn)
+	sqlDB.SetMaxOpenConns(maxOpenConn)
+	sqlDB.SetConnMaxLifetime(connMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(connMaxIdleTime)
 
 	// 测试连接（使用带超时的 context，确保不会无限等待）
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -165,11 +150,15 @@ func NewClient(config *GormConfig) (*Client, error) {
 		}
 
 		// 配置读写分离
-		err = db.Use(dbresolver.Register(dbresolver.Config{
+		resolver := dbresolver.Register(dbresolver.Config{
 			Replicas:          slaveDialectors,
 			Policy:            dbresolver.RandomPolicy{},
 			TraceResolverMode: true,
-		}))
+		}).SetMaxIdleConns(maxIdleConn).
+			SetMaxOpenConns(maxOpenConn).
+			SetConnMaxLifetime(connMaxLifetime).
+			SetConnMaxIdleTime(connMaxIdleTime)
+		err = db.Use(resolver)
 		if err != nil {
 			sqlDB.Close()
 			return nil, fmt.Errorf("failed to register db resolver: %w", err)
@@ -185,6 +174,37 @@ func NewClient(config *GormConfig) (*Client, error) {
 		db:     db,
 		config: config,
 	}, nil
+}
+
+func resolvePoolSettings(config *GormConfig) (int, int, time.Duration, time.Duration, error) {
+	maxIdleConn := config.MaxIdleConn
+	if maxIdleConn <= 0 {
+		maxIdleConn = defaultMaxIdleConns
+	}
+	maxOpenConn := config.MaxOpenConn
+	if maxOpenConn <= 0 {
+		maxOpenConn = defaultMaxOpenConns
+	}
+
+	connMaxLifetime := defaultConnMaxLifetime
+	if config.ConnMaxLifetime != "" {
+		var err error
+		connMaxLifetime, err = time.ParseDuration(config.ConnMaxLifetime)
+		if err != nil {
+			return 0, 0, 0, 0, fmt.Errorf("failed to parse ConnMaxLifetime %s: %w", config.ConnMaxLifetime, err)
+		}
+	}
+
+	connMaxIdleTime := defaultConnMaxIdleTime
+	if config.ConnMaxIdleTime != "" {
+		var err error
+		connMaxIdleTime, err = time.ParseDuration(config.ConnMaxIdleTime)
+		if err != nil {
+			return 0, 0, 0, 0, fmt.Errorf("failed to parse ConnMaxIdleTime %s: %w", config.ConnMaxIdleTime, err)
+		}
+	}
+
+	return maxIdleConn, maxOpenConn, connMaxLifetime, connMaxIdleTime, nil
 }
 
 func newGormConfig(config *GormConfig) *gorm.Config {

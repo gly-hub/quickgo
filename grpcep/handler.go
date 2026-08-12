@@ -279,8 +279,8 @@ func isNilReflectValue(value reflect.Value) bool {
 }
 
 func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string {
-	// 先尝试解析为 map，检查是否包含 CommonResp 或 common_resp 字段
-	var dataMap map[string]interface{}
+	// 只解码顶层字段；未处理的 data 保持原始 JSON，避免完整响应二次反序列化。
+	var dataMap map[string]jsoniter.RawMessage
 	var code int32 = SuccessCode
 	var msg string = SuccessDesc
 	var hasCommonResp bool
@@ -290,42 +290,28 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 		// 成功解析为 map，检查是否存在 CommonResp 字段
 		if commonRespVal, exists := dataMap[CommonRespKey]; exists {
 			hasCommonResp = true
-			// 解析 CommonResp
-			if commonRespMap, ok := commonRespVal.(map[string]interface{}); ok {
-				if codeVal, ok := commonRespMap["code"].(float64); ok {
-					code = int32(codeVal)
-				}
-				if msgVal, ok := commonRespMap["msg"].(string); ok {
-					msg = msgVal
-				}
-			}
+			code, msg = decodeCommonResp(commonRespVal, code, msg)
 			// 移除 CommonResp 字段，因为它不应该出现在最终的 data 中
 			delete(dataMap, CommonRespKey)
 		} else if commonRespVal, exists := dataMap[CommonRespKeyV2]; exists {
 			// 检查是否存在 common_resp 字段（小写版本）
 			hasCommonResp = true
-			// 解析 common_resp
-			if commonRespMap, ok := commonRespVal.(map[string]interface{}); ok {
-				if codeVal, ok := commonRespMap["code"].(float64); ok {
-					code = int32(codeVal)
-				}
-				if msgVal, ok := commonRespMap["msg"].(string); ok {
-					msg = msgVal
-				}
-			}
+			code, msg = decodeCommonResp(commonRespVal, code, msg)
 			// 移除 common_resp 字段，因为它不应该出现在最终的 data 中
 			delete(dataMap, CommonRespKeyV2)
 		} else {
 			// 如果没有 CommonResp，检查是否有 code 和 message 字段（proto 响应格式）
 			if codeVal, exists := dataMap["code"]; exists {
-				if codeFloat, ok := codeVal.(float64); ok {
-					code = int32(codeFloat)
+				var ok bool
+				code, ok = decodeJSONCode(codeVal, code)
+				if ok {
 					hasCodeAndMsg = true
 				}
 			}
 			if msgVal, exists := dataMap["message"]; exists {
-				if msgStr, ok := msgVal.(string); ok {
-					msg = msgStr
+				var ok bool
+				msg, ok = decodeJSONString(msgVal, msg)
+				if ok {
 					hasCodeAndMsg = true
 				}
 			}
@@ -354,14 +340,7 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 			jsonResp.Data = dataMap
 		}
 	} else {
-		// 如果没有 CommonResp 也没有 code/message，将原始数据解析为任意类型作为 data
-		var rawData interface{}
-		if err := jsoniter.Unmarshal(byteData, &rawData); err == nil {
-			jsonResp.Data = rawData
-		} else {
-			// 如果解析失败，使用原始字节数据
-			jsonResp.Data = jsoniter.RawMessage(byteData)
-		}
+		jsonResp.Data = jsoniter.RawMessage(byteData)
 	}
 
 	// 序列化为 JSON 字符串
@@ -379,6 +358,42 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 	}
 
 	return string(result)
+}
+
+func decodeCommonResp(data jsoniter.RawMessage, defaultCode int32, defaultMsg string) (int32, string) {
+	var commonResp map[string]jsoniter.RawMessage
+	if err := jsoniter.Unmarshal(data, &commonResp); err != nil {
+		return defaultCode, defaultMsg
+	}
+	if code, ok := decodeJSONCode(commonResp["code"], defaultCode); ok {
+		defaultCode = code
+	}
+	if msg, ok := decodeJSONString(commonResp["msg"], defaultMsg); ok {
+		defaultMsg = msg
+	}
+	return defaultCode, defaultMsg
+}
+
+func decodeJSONCode(data jsoniter.RawMessage, defaultCode int32) (int32, bool) {
+	if len(data) == 0 || string(data) == "null" {
+		return defaultCode, false
+	}
+	var code float64
+	if err := jsoniter.Unmarshal(data, &code); err != nil {
+		return defaultCode, false
+	}
+	return int32(code), true
+}
+
+func decodeJSONString(data jsoniter.RawMessage, defaultMsg string) (string, bool) {
+	if len(data) == 0 || string(data) == "null" {
+		return defaultMsg, false
+	}
+	var msg string
+	if err := jsoniter.Unmarshal(data, &msg); err != nil {
+		return defaultMsg, false
+	}
+	return msg, true
 }
 
 func (h *BaseHandler) RPCCtx(c *fiber.Ctx) context.Context {

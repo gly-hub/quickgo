@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/team-dandelion/quickgo/grpc"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	rpc "google.golang.org/grpc"
 )
 
@@ -62,6 +64,8 @@ type GrpcClientManager struct {
 	globalConfig        *GrpcClientConfig      // 全局配置（所有服务共享）
 	etcdResolver        *grpc.EtcdResolver     // 共享的 etcd resolver
 	mu                  sync.RWMutex
+	poolGroup           singleflight.Group
+	poolGeneration      uint64
 	healthCheckInterval time.Duration // 健康检查间隔
 	reconnectInterval   time.Duration // 重连间隔
 	healthCheckCtx      context.Context
@@ -192,6 +196,7 @@ func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (
 	m.mu.RLock()
 	pool, exists := m.clientPools[serviceName]
 	_, registered := m.services[serviceName]
+	generation := m.poolGeneration
 	m.mu.RUnlock()
 
 	if exists && pool != nil {
@@ -204,36 +209,81 @@ func (m *GrpcClientManager) GetClient(ctx context.Context, serviceName string) (
 		return nil, fmt.Errorf("service not registered: %s", serviceName)
 	}
 
-	// 创建连接池可能触发网络 I/O，避免持有 manager 写锁。
-	newPool, err := m.createClientPool(ctx, serviceName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create client pool for service %s: %w", serviceName, err)
-	}
+	poolKey := serviceName + ":" + strconv.FormatUint(generation, 10)
+	resultCh := m.poolGroup.DoChan(poolKey, func() (interface{}, error) {
+		m.mu.RLock()
+		pool, exists := m.clientPools[serviceName]
+		_, registered := m.services[serviceName]
+		currentGeneration := m.poolGeneration
+		m.mu.RUnlock()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if pool, exists := m.clientPools[serviceName]; exists && pool != nil {
-		client := pool.getClient()
-		if client != nil && client.IsUsable() {
-			_ = newPool.close()
-			return client, nil
+		if exists && pool != nil {
+			if client := pool.getClient(); client != nil && client.IsUsable() {
+				return client, nil
+			}
 		}
-		_ = pool.close()
-	}
-	if _, exists := m.services[serviceName]; !exists {
-		_ = newPool.close()
-		return nil, fmt.Errorf("service not registered: %s", serviceName)
-	}
+		if !registered {
+			return nil, fmt.Errorf("service not registered: %s", serviceName)
+		}
+		if currentGeneration != generation {
+			return nil, fmt.Errorf("gRPC client manager was reset while creating pool for service %s", serviceName)
+		}
 
-	m.clientPools[serviceName] = newPool
-	logger.Info(ctx, "Created gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
+		// 创建连接池可能触发网络 I/O，避免持有 manager 写锁。
+		initCtx, cancel := m.poolInitializationContext()
+		defer cancel()
+		newPool, err := m.createClientPool(initCtx, serviceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create client pool for service %s: %w", serviceName, err)
+		}
 
-	client := newPool.getClient()
-	if client == nil {
-		return nil, fmt.Errorf("no usable grpc client available for service %s", serviceName)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if pool, exists := m.clientPools[serviceName]; exists && pool != nil {
+			if client := pool.getClient(); client != nil && client.IsUsable() {
+				_ = newPool.close()
+				return client, nil
+			}
+			_ = pool.close()
+		}
+		if _, exists := m.services[serviceName]; !exists {
+			_ = newPool.close()
+			return nil, fmt.Errorf("service not registered: %s", serviceName)
+		}
+		if m.poolGeneration != generation {
+			_ = newPool.close()
+			return nil, fmt.Errorf("gRPC client manager was reset while creating pool for service %s", serviceName)
+		}
+
+		m.clientPools[serviceName] = newPool
+		logger.Info(initCtx, "Created gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
+
+		client := newPool.getClient()
+		if client == nil {
+			return nil, fmt.Errorf("no usable grpc client available for service %s", serviceName)
+		}
+		return client, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		return result.Val.(*grpc.Client), nil
 	}
+}
 
-	return client, nil
+func (m *GrpcClientManager) poolInitializationContext() (context.Context, context.CancelFunc) {
+	timeout := 10 * time.Second
+	if configured := m.globalConfig.Timeout; configured != "" {
+		if parsed, err := time.ParseDuration(configured); err == nil && parsed > 0 {
+			timeout = parsed
+		}
+	}
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 // GetConn 获取服务连接（便捷方法）
@@ -426,6 +476,7 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 	m.mu.RLock()
 	services := make([]string, 0, len(m.services))
 	existingPools := make(map[string]struct{}, len(m.clientPools))
+	generation := m.poolGeneration
 	for serviceName := range m.services {
 		services = append(services, serviceName)
 	}
@@ -458,6 +509,12 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("service %s: service not registered", serviceName))
 			continue
 		}
+		if m.poolGeneration != generation {
+			m.mu.Unlock()
+			_ = pool.close()
+			errs = append(errs, fmt.Errorf("service %s: gRPC client manager was reset while connecting", serviceName))
+			continue
+		}
 		m.clientPools[serviceName] = pool
 		m.mu.Unlock()
 		logger.Info(ctx, "Connected gRPC client pool: service=%s, poolSize=%d", serviceName, m.globalConfig.PoolSize)
@@ -474,6 +531,7 @@ func (m *GrpcClientManager) ConnectAll(ctx context.Context) error {
 func (m *GrpcClientManager) CloseClient(serviceName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.poolGeneration++
 
 	pool, exists := m.clientPools[serviceName]
 	if !exists {
@@ -497,6 +555,7 @@ func (m *GrpcClientManager) CloseAll() error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.poolGeneration++
 
 	var errs []error
 	for serviceName, pool := range m.clientPools {

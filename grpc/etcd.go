@@ -20,7 +20,9 @@ const (
 	// DefaultEtcdPrefix 默认 etcd 前缀
 	DefaultEtcdPrefix = "/grpc/services"
 	// DefaultEtcdTTL 默认 TTL（秒）
-	DefaultEtcdTTL = 30
+	DefaultEtcdTTL             = 30
+	etcdRecoveryInitialBackoff = time.Second
+	etcdRecoveryMaxBackoff     = 30 * time.Second
 )
 
 var errNoServiceAddresses = errors.New("no addresses found")
@@ -257,12 +259,20 @@ func (r *EtcdResolver) Close() error {
 
 // EtcdRegistry etcd 服务注册实现
 type EtcdRegistry struct {
-	client    *clientv3.Client
-	prefix    string
-	ttl       int64
-	leaseID   clientv3.LeaseID
-	leaseKeep <-chan *clientv3.LeaseKeepAliveResponse
-	mu        sync.RWMutex
+	client          *clientv3.Client
+	prefix          string
+	ttl             int64
+	leaseID         clientv3.LeaseID
+	leaseKeep       <-chan *clientv3.LeaseKeepAliveResponse
+	keepAliveCtx    context.Context
+	keepAliveCancel context.CancelFunc
+	registered      bool
+	serviceName     string
+	address         string
+	metadata        map[string]string
+	closed          bool
+	mu              sync.RWMutex
+	operationMu     sync.Mutex
 }
 
 // NewEtcdRegistry 创建 etcd 服务注册
@@ -307,77 +317,63 @@ func NewEtcdRegistry(config EtcdConfig) (*EtcdRegistry, error) {
 
 // Register 注册服务
 func (r *EtcdRegistry) Register(ctx context.Context, serviceName, address string, metadata map[string]string) error {
+	if serviceName == "" || address == "" {
+		return errors.New("service name and address are required")
+	}
+
+	r.operationMu.Lock()
+	defer r.operationMu.Unlock()
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// 创建租约
-	leaseResp, err := r.client.Grant(ctx, r.ttl)
-	if err != nil {
-		return fmt.Errorf("failed to create lease: %w", err)
+	if r.closed || r.client == nil {
+		r.mu.Unlock()
+		return errors.New("etcd registry is closed")
 	}
-	r.leaseID = leaseResp.ID
+	r.stopKeepAliveLocked()
+	r.registered = true
+	r.serviceName = serviceName
+	r.address = address
+	r.metadata = cloneStringMap(metadata)
+	r.mu.Unlock()
 
-	// 构建 key，格式：/prefix/service-name/address
-	key := path.Join(r.prefix, serviceName, address)
-
-	// 构建 value（包含元数据）
-	value := address
-	if len(metadata) > 0 {
-		metadataJSON, err := json.Marshal(metadata)
-		if err == nil {
-			value = string(metadataJSON)
-		}
+	if err := r.establishLease(ctx); err != nil {
+		r.mu.Lock()
+		r.registered = false
+		r.mu.Unlock()
+		return err
 	}
-
-	// 注册服务
-	_, err = r.client.Put(ctx, key, value, clientv3.WithLease(r.leaseID))
-	if err != nil {
-		_, _ = r.client.Revoke(ctx, r.leaseID)
-		r.leaseID = 0
-		return fmt.Errorf("failed to register service: %w", err)
-	}
-
-	// 启动心跳保持（使用独立的 context，因为心跳需要持续运行）
-	keepAliveCtx := context.Background()
-	r.leaseKeep, err = r.client.KeepAlive(keepAliveCtx, r.leaseID)
-	if err != nil {
-		_, _ = r.client.Revoke(ctx, r.leaseID)
-		r.leaseID = 0
-		return fmt.Errorf("failed to start keepalive: %w", err)
-	}
-
-	// 处理心跳响应
-	go func() {
-		for ka := range r.leaseKeep {
-			if ka == nil {
-				logger.Warn(keepAliveCtx, "KeepAlive channel closed: service=%s, address=%s", serviceName, address)
-				return
-			}
-		}
-	}()
-
-	logger.Info(ctx, "Service registered to etcd: service=%s, address=%s, key=%s", serviceName, address, key)
+	r.startKeepAlive()
+	logger.Info(ctx, "Service registered to etcd: service=%s, address=%s, key=%s", serviceName, address, path.Join(r.prefix, serviceName, address))
 	return nil
 }
 
 // Deregister 注销服务
 func (r *EtcdRegistry) Deregister(ctx context.Context, serviceName, address string) error {
+	r.operationMu.Lock()
+	defer r.operationMu.Unlock()
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.stopKeepAliveLocked()
+	r.registered = false
+	leaseID := r.leaseID
+	r.leaseID = 0
+	client := r.client
+	r.mu.Unlock()
 
 	// 撤销租约（会自动停止心跳）
-	if r.leaseID != 0 {
-		_, err := r.client.Revoke(ctx, r.leaseID)
+	if leaseID != 0 && client != nil {
+		_, err := client.Revoke(ctx, leaseID)
 		if err != nil {
-			logger.Error(ctx, "Failed to revoke lease: leaseID=%d, error=%v", r.leaseID, err)
+			logger.Error(ctx, "Failed to revoke lease: leaseID=%d, error=%v", leaseID, err)
 		}
-		r.leaseID = 0
-		r.leaseKeep = nil
 	}
 
 	// 删除 key
 	key := path.Join(r.prefix, serviceName, address)
-	_, err := r.client.Delete(ctx, key)
+	if client == nil {
+		return errors.New("etcd registry is closed")
+	}
+	_, err := client.Delete(ctx, key)
 	if err != nil {
 		return fmt.Errorf("failed to deregister service: %w", err)
 	}
@@ -406,21 +402,181 @@ func (r *EtcdRegistry) KeepAlive(ctx context.Context, serviceName, address strin
 
 // Close 关闭注册中心连接
 func (r *EtcdRegistry) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.operationMu.Lock()
+	defer r.operationMu.Unlock()
 
-	// 撤销租约（会自动停止心跳）
-	if r.leaseID != 0 {
-		ctx := context.Background()
-		_, _ = r.client.Revoke(ctx, r.leaseID)
-		r.leaseID = 0
-		r.leaseKeep = nil
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	r.registered = false
+	r.stopKeepAliveLocked()
+	leaseID := r.leaseID
+	r.leaseID = 0
+	client := r.client
+	r.client = nil
+	r.mu.Unlock()
+
+	if client == nil {
+		return nil
+	}
+	if leaseID != 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = client.Revoke(ctx, leaseID)
+		cancel()
+	}
+	return client.Close()
+}
+
+func (r *EtcdRegistry) establishLease(ctx context.Context) error {
+	r.mu.RLock()
+	if r.closed || !r.registered || r.client == nil {
+		r.mu.RUnlock()
+		return errors.New("etcd registry is not active")
+	}
+	client := r.client
+	ttl := r.ttl
+	prefix := r.prefix
+	serviceName := r.serviceName
+	address := r.address
+	metadata := cloneStringMap(r.metadata)
+	r.mu.RUnlock()
+
+	leaseResp, err := client.Grant(ctx, ttl)
+	if err != nil {
+		return fmt.Errorf("failed to create lease: %w", err)
+	}
+	leaseID := leaseResp.ID
+	key := path.Join(prefix, serviceName, address)
+	value := address
+	if len(metadata) > 0 {
+		metadataJSON, marshalErr := json.Marshal(metadata)
+		if marshalErr != nil {
+			_, _ = client.Revoke(ctx, leaseID)
+			return fmt.Errorf("failed to marshal service metadata: %w", marshalErr)
+		}
+		value = string(metadataJSON)
+	}
+	if _, err := client.Put(ctx, key, value, clientv3.WithLease(leaseID)); err != nil {
+		_, _ = client.Revoke(ctx, leaseID)
+		return fmt.Errorf("failed to register service: %w", err)
 	}
 
-	if r.client != nil {
-		return r.client.Close()
+	keepAliveCtx, keepAliveCancel := context.WithCancel(context.Background())
+	leaseKeep, err := client.KeepAlive(keepAliveCtx, leaseID)
+	if err != nil {
+		keepAliveCancel()
+		_, _ = client.Revoke(ctx, leaseID)
+		return fmt.Errorf("failed to start keepalive: %w", err)
+	}
+
+	r.mu.Lock()
+	if r.closed || !r.registered || r.client != client {
+		r.mu.Unlock()
+		keepAliveCancel()
+		_, _ = client.Revoke(context.Background(), leaseID)
+		return errors.New("etcd registry stopped while registering service")
+	}
+	oldLeaseID := r.leaseID
+	oldKeepAliveCancel := r.keepAliveCancel
+	r.leaseID = leaseID
+	r.leaseKeep = leaseKeep
+	r.keepAliveCtx = keepAliveCtx
+	r.keepAliveCancel = keepAliveCancel
+	r.mu.Unlock()
+
+	if oldKeepAliveCancel != nil {
+		oldKeepAliveCancel()
+	}
+	if oldLeaseID != 0 && oldLeaseID != leaseID {
+		_, _ = client.Revoke(context.Background(), oldLeaseID)
 	}
 	return nil
+}
+
+func (r *EtcdRegistry) startKeepAlive() {
+	r.mu.RLock()
+	if r.closed || !r.registered || r.keepAliveCancel == nil {
+		r.mu.RUnlock()
+		return
+	}
+	serviceName := r.serviceName
+	address := r.address
+	keepAliveCtx := r.keepAliveCtx
+	r.mu.RUnlock()
+
+	go r.keepAliveLoop(keepAliveCtx, serviceName, address)
+}
+
+func (r *EtcdRegistry) keepAliveLoop(ctx context.Context, serviceName, address string) {
+	backoff := etcdRecoveryInitialBackoff
+	for {
+		r.mu.RLock()
+		leaseKeep := r.leaseKeep
+		currentKeepAliveCtx := r.keepAliveCtx
+		registered := r.registered
+		closed := r.closed
+		r.mu.RUnlock()
+		if closed || !registered || leaseKeep == nil || currentKeepAliveCtx != ctx {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case response, ok := <-leaseKeep:
+			if ok && response != nil {
+				continue
+			}
+		}
+
+		logger.Warn(context.Background(), "Etcd keepalive stopped; re-registering service: service=%s, address=%s", serviceName, address)
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			r.operationMu.Lock()
+			recoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := r.establishLease(recoveryCtx)
+			cancel()
+			r.operationMu.Unlock()
+			if err == nil {
+				r.startKeepAlive()
+				return
+			}
+			logger.Warn(context.Background(), "Failed to re-register etcd service; retrying: service=%s, address=%s, error=%v", serviceName, address, err)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			backoff = min(backoff*2, etcdRecoveryMaxBackoff)
+		}
+	}
+}
+
+func (r *EtcdRegistry) stopKeepAliveLocked() {
+	if r.keepAliveCancel != nil {
+		r.keepAliveCancel()
+		r.keepAliveCancel = nil
+	}
+	r.leaseKeep = nil
+	r.keepAliveCtx = nil
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // RegisterEtcdResolver 注册 etcd resolver

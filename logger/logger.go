@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,10 +19,19 @@ import (
 var (
 	loggerPackage     string
 	callerInitOnce    sync.Once
-	maximumCallDepth  = 25
+	projectRoot       string
+	projectRootOnce   sync.Once
 	knownLoggerFrames = 4
 	formatVerbPattern = regexp.MustCompile(`%(?:\[[0-9]+\])?[-+#0 ]*(?:\*|\[[0-9]+\]\*)?(?:\.(?:\*|\[[0-9]+\]\*))?[bcdefgGopqstTUvVxX%]`)
+	frameworkPackages = []string{
+		"google.golang.org/grpc",
+		"github.com/spf13/cobra",
+		"go.opentelemetry.io",
+		"gorm.io",
+	}
 )
+
+const maximumCallDepth = 25
 
 // Level 日志级别
 type Level int
@@ -44,22 +54,45 @@ var levelNames = map[Level]string{
 
 // Logger 日志记录器
 type Logger struct {
-	level      Level
-	output     *os.File
-	service    string
-	version    string
-	fields     map[string]interface{}
-	callerSkip int
-	mu         *sync.RWMutex
+	level         *atomic.Int32
+	output        *os.File
+	service       string
+	version       string
+	fields        map[string]interface{}
+	traceID       string
+	spanID        string
+	callerSkip    int
+	disableCaller bool
+	mu            *sync.RWMutex
+	writer        *writerState
 }
 
 // Config 日志配置
 type Config struct {
-	Level      Level  // 日志级别
-	Output     string // 输出文件路径，空则输出到 stdout
-	Service    string // 服务名称
-	Version    string // 服务版本
-	CallerSkip int    // 调用栈跳过层数，0表示使用动态检测
+	Level         Level  // 日志级别
+	Output        string // 输出文件路径，空则输出到 stdout
+	Service       string // 服务名称
+	Version       string // 服务版本
+	CallerSkip    int    // 调用栈跳过层数，0表示使用动态检测
+	EnableCaller  bool   // 是否记录调用者信息，默认 false
+	DisableCaller bool   // Deprecated: 使用 EnableCaller；设置为 true 会强制禁用调用者信息
+	Async         bool   // 是否异步写出日志，默认 false
+	BufferSize    int    // 异步写出队列长度，默认 1024
+}
+
+const defaultBufferSize = 1024
+
+type logItem struct {
+	data  []byte
+	entry *LogEntry
+	flush chan struct{}
+}
+
+type writerState struct {
+	async  bool
+	queue  chan logItem
+	worker sync.WaitGroup
+	closed bool
 }
 
 // LogEntry 日志条目
@@ -80,13 +113,22 @@ type LogEntry struct {
 func NewLogger(config Config) (*Logger, error) {
 	// CallerSkip 为 0 表示使用动态检测，不需要设置默认值
 
+	level := &atomic.Int32{}
+	level.Store(int32(config.Level))
+	enableCaller := config.EnableCaller || config.CallerSkip > 0
+	if config.DisableCaller {
+		enableCaller = false
+	}
+
 	logger := &Logger{
-		level:      config.Level,
-		service:    config.Service,
-		version:    config.Version,
-		fields:     make(map[string]interface{}),
-		callerSkip: config.CallerSkip,
-		mu:         &sync.RWMutex{},
+		level:         level,
+		service:       config.Service,
+		version:       config.Version,
+		fields:        make(map[string]interface{}),
+		callerSkip:    config.CallerSkip,
+		disableCaller: !enableCaller,
+		mu:            &sync.RWMutex{},
+		writer:        &writerState{async: config.Async},
 	}
 
 	// 设置输出
@@ -98,6 +140,15 @@ func NewLogger(config Config) (*Logger, error) {
 			return nil, fmt.Errorf("failed to open log file: %w", err)
 		}
 		logger.output = file
+	}
+	if logger.writer.async {
+		bufferSize := config.BufferSize
+		if bufferSize <= 0 {
+			bufferSize = defaultBufferSize
+		}
+		logger.writer.queue = make(chan logItem, bufferSize)
+		logger.writer.worker.Add(1)
+		go logger.runWriter()
 	}
 
 	return logger, nil
@@ -118,37 +169,39 @@ func (l *Logger) WithFields(fields map[string]interface{}) *Logger {
 
 // WithField 添加单个字段
 func (l *Logger) WithField(key string, value interface{}) *Logger {
-	return l.WithFields(map[string]interface{}{key: value})
+	newLogger := *l
+	newLogger.fields = make(map[string]interface{}, len(l.fields)+1)
+	for fieldKey, fieldValue := range l.fields {
+		newLogger.fields[fieldKey] = fieldValue
+	}
+	newLogger.fields[key] = value
+	return &newLogger
 }
 
 // WithContext 从 context 中提取链路信息
 func (l *Logger) WithContext(ctx context.Context) *Logger {
 	traceID := GetTraceID(ctx)
 	spanID := GetSpanID(ctx)
-
-	logger := l.WithFields(map[string]interface{}{
-		"trace_id": traceID,
-		"span_id":  spanID,
-	})
-	return logger
+	if traceID == "" && spanID == "" {
+		return l
+	}
+	newLogger := *l
+	newLogger.traceID = traceID
+	newLogger.spanID = spanID
+	return &newLogger
 }
 
 // log 内部日志方法
 func (l *Logger) log(ctx context.Context, level Level, msg string, err error, fields map[string]interface{}) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	if level < l.level {
+	if !l.isEnabled(level) {
 		return
 	}
 
-	// 合并字段
-	allFields := make(map[string]interface{})
-	for k, v := range l.fields {
-		allFields[k] = v
-	}
-	for k, v := range fields {
-		allFields[k] = v
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	if l.writer.closed || !l.isEnabled(level) {
+		return
 	}
 
 	// 获取调用者信息（从项目根目录开始的完整路径）
@@ -161,59 +214,76 @@ func (l *Logger) log(ctx context.Context, level Level, msg string, err error, fi
 	caller := ""
 	callerShort := "" // 用于控制台显示的简短格式
 
-	// 获取调用者信息
-	var pc uintptr
-	var file string
-	var line int
+	if !l.disableCaller {
+		// 获取调用者信息
+		var pc uintptr
+		var file string
+		var line int
 
-	if l.callerSkip > 0 {
-		// 使用固定的跳过层级
-		skip := l.callerSkip + 1
-		var ok bool
-		pc, file, line, ok = runtime.Caller(skip)
-		if !ok {
-			pc, file, line = 0, "", 0
+		if l.callerSkip > 0 {
+			// 使用固定的跳过层级
+			skip := l.callerSkip + 1
+			var ok bool
+			pc, file, line, ok = runtime.Caller(skip)
+			if !ok {
+				pc, file, line = 0, "", 0
+			}
+		} else {
+			// 使用动态检测
+			pc, file, line = getCaller()
 		}
-	} else {
-		// 使用动态检测
-		pc, file, line = getCaller()
-	}
 
-	// 获取函数信息
-	if pc != 0 {
-		fn := runtime.FuncForPC(pc)
-		if fn != nil {
-			funcName := fn.Name()
-			// 简化函数名
-			if idx := strings.LastIndex(funcName, "."); idx >= 0 {
-				funcName = funcName[idx+1:]
-			}
-
-			// 获取项目根目录
-			projectRoot := getProjectRoot()
-
-			// 获取相对于项目根目录的路径
-			relPath := file
-			if projectRoot != "" {
-				if rel, err := filepath.Rel(projectRoot, file); err == nil {
-					relPath = rel
+		// 获取函数信息
+		if pc != 0 {
+			fn := runtime.FuncForPC(pc)
+			if fn != nil {
+				funcName := fn.Name()
+				// 简化函数名
+				if idx := strings.LastIndex(funcName, "."); idx >= 0 {
+					funcName = funcName[idx+1:]
 				}
+
+				// 获取项目根目录
+				projectRoot := getProjectRoot()
+
+				// 获取相对于项目根目录的路径
+				relPath := file
+				if projectRoot != "" {
+					if rel, err := filepath.Rel(projectRoot, file); err == nil {
+						relPath = rel
+					}
+				}
+
+				// 用于 JSON 的完整路径（包含函数名）
+				caller = fmt.Sprintf("%s:%d:%s", relPath, line, funcName)
+
+				// 用于控制台显示的简短格式（只包含路径和行号）
+				callerShort = fmt.Sprintf("%s:%d", relPath, line)
 			}
-
-			// 用于 JSON 的完整路径（包含函数名）
-			caller = fmt.Sprintf("%s:%d:%s", relPath, line, funcName)
-
-			// 用于控制台显示的简短格式（只包含路径和行号）
-			callerShort = fmt.Sprintf("%s:%d", relPath, line)
 		}
 	}
 
 	// 从 context 获取链路信息
 	traceID := GetTraceID(ctx)
 	spanID := GetSpanID(ctx)
+	if traceID == "" {
+		traceID = l.traceID
+	}
+	if spanID == "" {
+		spanID = l.spanID
+	}
 
-	// 判断是否是控制台输出
 	isConsole := l.output == os.Stdout || l.output == os.Stderr
+	allFields := l.fields
+	if !isConsole && len(fields) > 0 {
+		allFields = make(map[string]interface{}, len(l.fields)+len(fields))
+		for k, v := range l.fields {
+			allFields[k] = v
+		}
+		for k, v := range fields {
+			allFields[k] = v
+		}
+	}
 
 	if isConsole {
 		// 控制台输出：使用易读的文本格式
@@ -228,18 +298,25 @@ func (l *Logger) log(ctx context.Context, level Level, msg string, err error, fi
 		}
 
 		// 输出格式：时间 [级别] 日志信息 [trace_id:xxx] [to/file.go:123]
-		var parts []string
-		parts = append(parts, timestamp, fmt.Sprintf("[%s]", levelStr), logMsg)
-
+		var builder strings.Builder
+		builder.Grow(len(timestamp) + len(levelStr) + len(logMsg) + len(traceID) + len(callerShort) + 24)
+		builder.WriteString(timestamp)
+		builder.WriteString(" [")
+		builder.WriteString(levelStr)
+		builder.WriteString("] ")
+		builder.WriteString(logMsg)
 		if traceID != "" {
-			parts = append(parts, fmt.Sprintf("[trace_id:%s]", traceID))
+			builder.WriteString(" [trace_id:")
+			builder.WriteString(traceID)
+			builder.WriteByte(']')
 		}
-
 		if callerShort != "" {
-			parts = append(parts, fmt.Sprintf("[%s]", callerShort))
+			builder.WriteString(" [")
+			builder.WriteString(callerShort)
+			builder.WriteByte(']')
 		}
-
-		fmt.Fprintf(l.output, "%s\n", strings.Join(parts, " "))
+		builder.WriteByte('\n')
+		l.write(logItem{data: []byte(builder.String())})
 	} else {
 		// 文件输出：使用 JSON 格式
 		entry := LogEntry{
@@ -258,21 +335,15 @@ func (l *Logger) log(ctx context.Context, level Level, msg string, err error, fi
 			entry.Error = err.Error()
 		}
 
-		// 序列化为 JSON
-		data, jsonErr := json.Marshal(entry)
-		if jsonErr != nil {
-			// 如果 JSON 序列化失败，使用简单格式
-			fmt.Fprintf(l.output, "[%s] %s: %s\n", levelNames[level], time.Now().Format(time.RFC3339), msg)
-			return
-		}
-
-		// 输出日志
-		fmt.Fprintln(l.output, string(data))
+		l.write(logItem{entry: &entry})
 	}
 }
 
 // Debug 调试日志，支持 fmt.Sprintf 风格格式化
 func (l *Logger) Debug(ctx context.Context, format string, args ...interface{}) {
+	if !l.isEnabled(LevelDebug) {
+		return
+	}
 	msg := format
 	if len(args) > 0 {
 		msg = fmt.Sprintf(format, args...)
@@ -282,6 +353,9 @@ func (l *Logger) Debug(ctx context.Context, format string, args ...interface{}) 
 
 // Info 信息日志，支持 fmt.Sprintf 风格格式化
 func (l *Logger) Info(ctx context.Context, format string, args ...interface{}) {
+	if !l.isEnabled(LevelInfo) {
+		return
+	}
 	msg := format
 	if len(args) > 0 {
 		msg = fmt.Sprintf(format, args...)
@@ -291,6 +365,9 @@ func (l *Logger) Info(ctx context.Context, format string, args ...interface{}) {
 
 // Warn 警告日志，支持 fmt.Sprintf 风格格式化
 func (l *Logger) Warn(ctx context.Context, format string, args ...interface{}) {
+	if !l.isEnabled(LevelWarn) {
+		return
+	}
 	msg := format
 	if len(args) > 0 {
 		msg = fmt.Sprintf(format, args...)
@@ -301,6 +378,9 @@ func (l *Logger) Warn(ctx context.Context, format string, args ...interface{}) {
 // Error 错误日志，支持 fmt.Sprintf 风格格式化
 // 如果最后一个参数是 error，会被提取为独立的 error 字段；否则所有参数用于格式化消息
 func (l *Logger) Error(ctx context.Context, format string, args ...interface{}) {
+	if !l.isEnabled(LevelError) {
+		return
+	}
 	msg, err := formatLogMessage(format, args...)
 	l.log(ctx, LevelError, msg, err, nil)
 }
@@ -308,8 +388,11 @@ func (l *Logger) Error(ctx context.Context, format string, args ...interface{}) 
 // Fatal 致命错误日志（会调用 os.Exit(1)），支持 fmt.Sprintf 风格格式化
 // 如果最后一个参数是 error，会被提取为独立的 error 字段；否则所有参数用于格式化消息
 func (l *Logger) Fatal(ctx context.Context, format string, args ...interface{}) {
-	msg, err := formatLogMessage(format, args...)
-	l.log(ctx, LevelFatal, msg, err, nil)
+	if l.isEnabled(LevelFatal) {
+		msg, err := formatLogMessage(format, args...)
+		l.log(ctx, LevelFatal, msg, err, nil)
+		_ = l.Flush()
+	}
 	os.Exit(1)
 }
 
@@ -353,24 +436,35 @@ func countFormatVerbs(format string) int {
 
 // SetLevel 设置日志级别
 func (l *Logger) SetLevel(level Level) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.level = level
+	l.level.Store(int32(level))
 }
 
 // GetLevel 获取日志级别
 func (l *Logger) GetLevel() Level {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.level
+	return Level(l.level.Load())
+}
+
+func (l *Logger) isEnabled(level Level) bool {
+	return level >= Level(l.level.Load())
 }
 
 // Close 关闭日志记录器
 func (l *Logger) Close() error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.output != nil && l.output != os.Stdout && l.output != os.Stderr {
-		err := l.output.Close()
+	if l.writer.closed {
+		l.mu.Unlock()
+		return nil
+	}
+	l.writer.closed = true
+	if l.writer.queue != nil {
+		close(l.writer.queue)
+	}
+	output := l.output
+	l.mu.Unlock()
+
+	l.writer.worker.Wait()
+	if output != nil && output != os.Stdout && output != os.Stderr {
+		err := output.Close()
 		if errors.Is(err, os.ErrClosed) {
 			return nil
 		}
@@ -379,34 +473,80 @@ func (l *Logger) Close() error {
 	return nil
 }
 
+// Flush waits until all previously queued asynchronous logs are written.
+func (l *Logger) Flush() error {
+	l.mu.RLock()
+	if l.writer.closed || !l.writer.async {
+		l.mu.RUnlock()
+		return nil
+	}
+	done := make(chan struct{})
+	l.writer.queue <- logItem{flush: done}
+	l.mu.RUnlock()
+	<-done
+	return nil
+}
+
+func (l *Logger) write(item logItem) {
+	if l.writer.async {
+		l.writer.queue <- item
+		return
+	}
+	l.writeItem(item)
+}
+
+func (l *Logger) runWriter() {
+	defer l.writer.worker.Done()
+	for item := range l.writer.queue {
+		if item.flush != nil {
+			close(item.flush)
+			continue
+		}
+		l.writeItem(item)
+	}
+}
+
+func (l *Logger) writeItem(item logItem) {
+	if item.entry != nil {
+		data, err := json.Marshal(item.entry)
+		if err != nil {
+			item.data = []byte(fmt.Sprintf("[%s] %s: %s\n", item.entry.Level, time.Now().Format(time.RFC3339), item.entry.Message))
+		} else {
+			item.data = append(data, '\n')
+		}
+	}
+	_, _ = l.output.Write(item.data)
+}
+
 // getProjectRoot 获取项目根目录
 // 通过查找 go.mod 文件来确定项目根目录
 func getProjectRoot() string {
-	// 获取当前工作目录
-	wd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-
-	// 从当前目录向上查找 go.mod 文件
-	dir := wd
-	for {
-		goModPath := filepath.Join(dir, "go.mod")
-		if _, err := os.Stat(goModPath); err == nil {
-			return dir
+	projectRootOnce.Do(func() {
+		// 获取当前工作目录
+		wd, err := os.Getwd()
+		if err != nil {
+			return
 		}
 
-		// 向上查找父目录
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// 已经到达根目录
-			break
-		}
-		dir = parent
-	}
+		// 从当前目录向上查找 go.mod 文件
+		dir := wd
+		for {
+			goModPath := filepath.Join(dir, "go.mod")
+			if _, err := os.Stat(goModPath); err == nil {
+				projectRoot = dir
+				return
+			}
 
-	// 如果找不到 go.mod，返回当前工作目录
-	return wd
+			// 向上查找父目录
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				projectRoot = wd
+				return
+			}
+			dir = parent
+		}
+	})
+	return projectRoot
 }
 
 // getPackageName reduces a fully qualified function name to the package name
@@ -427,12 +567,16 @@ func getPackageName(f string) string {
 func getCaller() (uintptr, string, int) {
 	// cache this package's fully-qualified name
 	callerInitOnce.Do(func() {
-		pcs := make([]uintptr, maximumCallDepth)
-		_ = runtime.Callers(0, pcs)
+		var pcs [maximumCallDepth]uintptr
+		depth := runtime.Callers(0, pcs[:])
 
 		// dynamic get the package name and the minimum caller depth
-		for i := 0; i < maximumCallDepth; i++ {
-			funcName := runtime.FuncForPC(pcs[i]).Name()
+		for _, pc := range pcs[:depth] {
+			fn := runtime.FuncForPC(pc)
+			if fn == nil {
+				continue
+			}
+			funcName := fn.Name()
 			if strings.Contains(funcName, "getCaller") {
 				loggerPackage = getPackageName(funcName)
 				break
@@ -441,17 +585,9 @@ func getCaller() (uintptr, string, int) {
 	})
 
 	// Restrict the lookback frames to avoid runaway lookups
-	pcs := make([]uintptr, maximumCallDepth)
-	depth := runtime.Callers(knownLoggerFrames, pcs)
+	var pcs [maximumCallDepth]uintptr
+	depth := runtime.Callers(knownLoggerFrames, pcs[:])
 	frames := runtime.CallersFrames(pcs[:depth])
-
-	// Known framework packages to exclude
-	frameworkPackages := []string{
-		"google.golang.org/grpc",
-		"github.com/spf13/cobra",
-		"go.opentelemetry.io",
-		"gorm.io",
-	}
 
 	for f, again := frames.Next(); again; f, again = frames.Next() {
 		pkg := getPackageName(f.Function)

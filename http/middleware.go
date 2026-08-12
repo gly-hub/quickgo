@@ -50,7 +50,7 @@ func TraceMiddleware() fiber.Handler {
 }
 
 // LoggingMiddleware 日志中间件
-// 记录请求和响应信息，包含链路追踪信息
+// 记录完成后的请求结果，包含链路追踪信息
 func LoggingMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		start := time.Now()
@@ -64,14 +64,6 @@ func LoggingMiddleware() fiber.Handler {
 		} else {
 			ctx = logger.StartSpan(ctx)
 		}
-
-		// 记录请求信息
-		logger.Info(ctx, "HTTP request: method=%s, path=%s, ip=%s, user_agent=%s",
-			c.Method(),
-			c.Path(),
-			c.IP(),
-			c.Get("User-Agent"),
-		)
 
 		// 处理请求
 		err := c.Next()
