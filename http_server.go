@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/team-dandelion/quickgo/http"
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/metrics"
+	"github.com/gly-hub/quickgo/http"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/metrics"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/adaptor"

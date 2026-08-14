@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/team-dandelion/quickgo/metrics"
+	"github.com/gly-hub/quickgo/metrics"
 )
 
 func TestGrpcServerKeepaliveParametersApplyConnectionLifetimeLimits(t *testing.T) {

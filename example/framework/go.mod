@@ -1,10 +1,10 @@
-module github.com/team-dandelion/quickgo/example/framework
+module github.com/gly-hub/quickgo/example/framework
 
 go 1.25.12
 
 require (
 	github.com/gofiber/fiber/v2 v2.52.12
-	github.com/team-dandelion/quickgo v0.0.0
+	github.com/gly-hub/quickgo v0.0.0
 	golang.org/x/crypto v0.51.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
@@ -102,4 +102,4 @@ require (
 	gorm.io/plugin/dbresolver v1.6.2 // indirect
 )
 
-replace github.com/team-dandelion/quickgo => ../..
+replace github.com/gly-hub/quickgo => ../..

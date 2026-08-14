@@ -12,8 +12,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/tracing"
 )
 
 // Server HTTP服务器封装

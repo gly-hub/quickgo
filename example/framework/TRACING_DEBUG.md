@@ -53,7 +53,7 @@ curl -v http://localhost:4318/v1/traces
 在代码中添加测试 span：
 
 ```go
-import "github.com/team-dandelion/quickgo/tracing"
+import "github.com/gly-hub/quickgo/tracing"
 
 // 在某个 handler 中
 ctx, span := tracing.StartSpan(ctx, "test-operation")

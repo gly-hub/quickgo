@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/team-dandelion/quickgo/grpc"
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/grpc"
+	"github.com/gly-hub/quickgo/logger"
 	"sync"
 	"sync/atomic"
 	"time"

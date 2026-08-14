@@ -1,8 +1,8 @@
 package service
 
 import (
-	gen "github.com/team-dandelion/quickgo/example/framework/auth-server/api/proto/gen"
-	"github.com/team-dandelion/quickgo/grpcep"
+	gen "github.com/gly-hub/quickgo/example/framework/auth-server/api/proto/gen"
+	"github.com/gly-hub/quickgo/grpcep"
 )
 
 // newLoginResponse 创建并初始化 LoginResponse

@@ -1,5 +1,5 @@
 // +hermetic
-module github.com/team-dandelion/quickgo
+module github.com/gly-hub/quickgo
 
 go 1.25.12
 

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gly-hub/quickgo/metrics"
 	"github.com/gofiber/fiber/v2"
-	"github.com/team-dandelion/quickgo/metrics"
 )
 
 func TestNewHTTPServerAppliesDefaultsWithoutMutatingInput(t *testing.T) {

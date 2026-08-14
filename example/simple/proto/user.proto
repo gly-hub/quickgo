@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package user;
 
-option go_package = "github.com/team-dandelion/quickgo/example/simple/proto/gen;gen";
+option go_package = "github.com/gly-hub/quickgo/example/simple/proto/gen;gen";
 
 import "google/protobuf/timestamp.proto";
 

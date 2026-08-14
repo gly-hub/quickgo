@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 

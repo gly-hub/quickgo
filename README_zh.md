@@ -2,7 +2,7 @@
 
 轻量、模块化的 Go 微服务框架：配置、生命周期、gRPC/HTTP、数据访问与可观测性统一管理。
 
-**模块路径：** `github.com/team-dandelion/quickgo`
+**模块路径：** `github.com/gly-hub/quickgo`
 
 ## 能力地图
 
@@ -63,7 +63,7 @@ curl http://127.0.0.1:8080/api/v1/users/
 ```go
 package main
 
-import "github.com/team-dandelion/quickgo"
+import "github.com/gly-hub/quickgo"
 
 func main() {
 	quickgo.InitConfig("local", "./config")

@@ -18,8 +18,8 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/tracing"
 )
 
 // Client gRPC客户端封装

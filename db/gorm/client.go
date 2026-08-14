@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gly-hub/quickgo/logger"
 	mysqldriver "github.com/go-sql-driver/mysql"
-	"github.com/team-dandelion/quickgo/logger"
 
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"

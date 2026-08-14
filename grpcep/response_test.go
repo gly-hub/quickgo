@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/team-dandelion/quickgo/gerr"
+	"github.com/gly-hub/quickgo/gerr"
 )
 
 // 模拟一个带 CommonResp 字段的响应结构（使用 CommonResp 字段名）

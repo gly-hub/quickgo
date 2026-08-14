@@ -55,7 +55,7 @@ tracing:
 ```go
 import (
     "quickgo"
-    "github.com/team-dandelion/quickgo/tracing"
+    "github.com/gly-hub/quickgo/tracing"
 )
 
 func main() {
@@ -114,7 +114,7 @@ httpServerConfig := &quickgo.HTTPServerConfig{
 
 ```go
 import (
-    "github.com/team-dandelion/quickgo/tracing"
+    "github.com/gly-hub/quickgo/tracing"
     "go.opentelemetry.io/otel/attribute"
 )
 

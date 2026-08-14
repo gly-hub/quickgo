@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )

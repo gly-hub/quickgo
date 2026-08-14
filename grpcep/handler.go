@@ -9,10 +9,10 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/team-dandelion/quickgo/gerr"
-	"github.com/team-dandelion/quickgo/http"
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo/gerr"
+	"github.com/gly-hub/quickgo/http"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/tracing"
 
 	jsoniter "github.com/json-iterator/go"
 
