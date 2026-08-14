@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 
 	"gorm.io/gorm"
 )

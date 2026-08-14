@@ -3,7 +3,7 @@ package grpcep
 import (
 	"reflect"
 
-	"github.com/team-dandelion/quickgo/gerr"
+	"github.com/gly-hub/quickgo/gerr"
 )
 
 func InitResponse(in interface{}) {

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/metrics"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/metrics"
 )
 
 func TestFrameworkLoggerFileOutput(t *testing.T) {

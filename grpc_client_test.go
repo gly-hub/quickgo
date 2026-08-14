@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	qgrpc "github.com/team-dandelion/quickgo/grpc"
+	qgrpc "github.com/gly-hub/quickgo/grpc"
 	"google.golang.org/grpc/connectivity"
 )
 

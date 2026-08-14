@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/team-dandelion/quickgo/db/redis"
-	gen "github.com/team-dandelion/quickgo/example/framework/auth-server/api/proto/gen"
-	"github.com/team-dandelion/quickgo/example/framework/auth-server/internal/model"
-	"github.com/team-dandelion/quickgo/grpcep"
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/db/redis"
+	gen "github.com/gly-hub/quickgo/example/framework/auth-server/api/proto/gen"
+	"github.com/gly-hub/quickgo/example/framework/auth-server/internal/model"
+	"github.com/gly-hub/quickgo/grpcep"
+	"github.com/gly-hub/quickgo/logger"
 	"golang.org/x/crypto/bcrypt"
 
 	gormDB "gorm.io/gorm"

@@ -2,7 +2,7 @@
 
 结构化 JSON 日志，支持链路追踪字段与全局 API。
 
-**Import：** `github.com/team-dandelion/quickgo/logger`
+**Import：** `github.com/gly-hub/quickgo/logger`
 
 ## 功能特性
 
@@ -23,7 +23,7 @@ package main
 import (
 	"context"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 )
 
 func main() {
@@ -52,7 +52,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 )
 
 func main() {

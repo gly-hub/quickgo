@@ -12,7 +12,7 @@ import (
 
 	"google.golang.org/grpc/resolver"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 )
 
 const (

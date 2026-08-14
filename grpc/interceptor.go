@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/team-dandelion/quickgo/grpcep"
+	"github.com/gly-hub/quickgo/grpcep"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 )
 
 // UnaryInterceptor 一元拦截器类型
