@@ -81,7 +81,7 @@ const file_lib_proto_rawDesc = "" +
 	"\n" +
 	"CommonResp\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x10\n" +
-	"\x03msg\x18\x02 \x01(\tR\x03msgB1Z/github.com/team-dandelion/quickgo/grpcep;grpcepb\x06proto3"
+	"\x03msg\x18\x02 \x01(\tR\x03msgB1Z/github.com/gly-hub/quickgo/grpcep;grpcepb\x06proto3"
 
 var (
 	file_lib_proto_rawDescOnce sync.Once

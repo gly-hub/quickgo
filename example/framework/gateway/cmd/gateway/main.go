@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"github.com/team-dandelion/quickgo"
-	"github.com/team-dandelion/quickgo/db/mongodb"
-	"github.com/team-dandelion/quickgo/db/redis"
-	"github.com/team-dandelion/quickgo/example/framework/gateway/internal/handler"
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo"
+	"github.com/gly-hub/quickgo/db/mongodb"
+	"github.com/gly-hub/quickgo/db/redis"
+	"github.com/gly-hub/quickgo/example/framework/gateway/internal/handler"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/tracing"
 
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/grpc"

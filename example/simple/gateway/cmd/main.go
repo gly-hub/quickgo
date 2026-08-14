@@ -5,11 +5,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/team-dandelion/quickgo"
-	gen "github.com/team-dandelion/quickgo/example/simple/proto/gen"
-	"github.com/team-dandelion/quickgo/grpcep"
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo"
+	gen "github.com/gly-hub/quickgo/example/simple/proto/gen"
+	"github.com/gly-hub/quickgo/grpcep"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/tracing"
 
 	"github.com/gofiber/fiber/v2"
 )

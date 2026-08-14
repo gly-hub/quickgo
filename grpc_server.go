@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/team-dandelion/quickgo/grpc"
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/metrics"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo/grpc"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/metrics"
+	"github.com/gly-hub/quickgo/tracing"
 
 	rpc "google.golang.org/grpc"
 

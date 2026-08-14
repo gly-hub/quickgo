@@ -9,12 +9,12 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/team-dandelion/quickgo/db/gorm"
-	"github.com/team-dandelion/quickgo/db/mongodb"
-	"github.com/team-dandelion/quickgo/db/redis"
-	"github.com/team-dandelion/quickgo/logger"
-	"github.com/team-dandelion/quickgo/metrics"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo/db/gorm"
+	"github.com/gly-hub/quickgo/db/mongodb"
+	"github.com/gly-hub/quickgo/db/redis"
+	"github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/metrics"
+	"github.com/gly-hub/quickgo/tracing"
 )
 
 // Framework 主体框架，统一管理所有组件

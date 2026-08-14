@@ -2,7 +2,7 @@
 
 Lightweight, modular Go framework for microservices — configuration, lifecycle, gRPC/HTTP, data access, and observability in one place.
 
-**Module:** `github.com/team-dandelion/quickgo`
+**Module:** `github.com/gly-hub/quickgo`
 
 ## Capability map
 
@@ -68,7 +68,7 @@ curl http://127.0.0.1:8080/api/v1/users/
 package main
 
 import (
-	"github.com/team-dandelion/quickgo"
+	"github.com/gly-hub/quickgo"
 )
 
 func main() {

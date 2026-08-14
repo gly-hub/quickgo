@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 
 	redisClient "github.com/redis/go-redis/v9"
 )

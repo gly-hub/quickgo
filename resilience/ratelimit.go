@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/team-dandelion/quickgo/gerr"
+	"github.com/gly-hub/quickgo/gerr"
 )
 
 // RateLimiter 限流器接口

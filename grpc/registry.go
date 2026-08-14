@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 )
 
 // ServiceRegistry 服务注册接口

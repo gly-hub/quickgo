@@ -3,13 +3,13 @@ package main
 import (
 	"fmt"
 
-	"github.com/team-dandelion/quickgo"
-	"github.com/team-dandelion/quickgo/db/gorm"
-	"github.com/team-dandelion/quickgo/db/redis"
-	gen "github.com/team-dandelion/quickgo/example/framework/auth-server/api/proto/gen"
-	"github.com/team-dandelion/quickgo/example/framework/auth-server/internal/handler"
-	"github.com/team-dandelion/quickgo/example/framework/auth-server/internal/service"
-	"github.com/team-dandelion/quickgo/tracing"
+	"github.com/gly-hub/quickgo"
+	"github.com/gly-hub/quickgo/db/gorm"
+	"github.com/gly-hub/quickgo/db/redis"
+	gen "github.com/gly-hub/quickgo/example/framework/auth-server/api/proto/gen"
+	"github.com/gly-hub/quickgo/example/framework/auth-server/internal/handler"
+	"github.com/gly-hub/quickgo/example/framework/auth-server/internal/service"
+	"github.com/gly-hub/quickgo/tracing"
 
 	rpc "google.golang.org/grpc"
 	gormDB "gorm.io/gorm"

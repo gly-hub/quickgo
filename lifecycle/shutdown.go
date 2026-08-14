@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/team-dandelion/quickgo/logger"
+	"github.com/gly-hub/quickgo/logger"
 )
 
 // ShutdownFunc 关闭函数类型
