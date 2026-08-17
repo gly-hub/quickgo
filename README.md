@@ -36,7 +36,7 @@ Lightweight, modular Go framework for microservices — configuration, lifecycle
 
 ## Requirements
 
-- Go **1.25.4+** (see `go.mod` / `toolchain`)
+- Go **1.25.13+** (see `go.mod`)
 - Optional local deps via Docker: etcd, Jaeger, Redis, MySQL
 
 ## Quick start (simple example, no etcd)

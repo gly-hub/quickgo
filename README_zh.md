@@ -36,7 +36,7 @@
 
 ## 环境要求
 
-- Go **1.25.4+**（见 `go.mod` 的 `toolchain`）
+- Go **1.25.13+**（见 `go.mod`）
 - 可选 Docker 依赖：etcd、Jaeger、Redis、MySQL
 
 ## 快速开始（simple 示例，无需 etcd）
