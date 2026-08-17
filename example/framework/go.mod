@@ -1,10 +1,10 @@
 module github.com/gly-hub/quickgo/example/framework
 
-go 1.25.12
+go 1.25.13
 
 require (
-	github.com/gofiber/fiber/v2 v2.52.12
 	github.com/gly-hub/quickgo v0.0.0
+	github.com/gofiber/fiber/v2 v2.52.12
 	golang.org/x/crypto v0.51.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
