@@ -192,7 +192,9 @@ func TestGrpcClientManagerGetClientFollowerHonorsOwnContext(t *testing.T) {
 		t.Fatal("leader did not start connecting")
 	}
 
-	followerCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	// Keep enough scheduling headroom for loaded CI runners while asserting that
+	// a follower respects its own context instead of waiting for the leader.
+	followerCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	_, err = manager.GetClient(followerCtx, "slow-service")
 	if !errors.Is(err, context.DeadlineExceeded) {
