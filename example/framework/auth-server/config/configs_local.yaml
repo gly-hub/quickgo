@@ -16,6 +16,10 @@ grpcServer:
   port: 50051
   keepAliveTime: "10s"
   keepAliveTimeout: "3s"
+  metadata:
+    version: "1.0.0"
+    weight: "10"
+    region: "local"
   etcd:
     endpoints:
       - "127.0.0.1:2379"

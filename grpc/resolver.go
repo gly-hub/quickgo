@@ -45,6 +45,12 @@ type watchUntilDoneDiscovery interface {
 	watchUntilDone(ctx context.Context, serviceName string, callback func([]string)) error
 }
 
+// resolverAddressDiscovery optionally provides endpoint attributes in addition
+// to the stable string-only ServiceDiscovery contract.
+type resolverAddressDiscovery interface {
+	ResolveResolverAddresses(ctx context.Context, serviceName string) ([]resolver.Address, error)
+}
+
 // StaticResolver 静态服务发现（直接指定地址列表）
 type StaticResolver struct {
 	addresses []string
@@ -261,6 +267,29 @@ func (r *serviceResolver) start() {
 
 // updateState 更新连接状态
 func (r *serviceResolver) updateState(addresses []string) {
+	resolvedAddresses := resolverAddressesFromStrings(addresses)
+	if len(addresses) > 0 {
+		if discovery, ok := r.sd.(resolverAddressDiscovery); ok {
+			enriched, err := discovery.ResolveResolverAddresses(r.ctx, r.getServiceName())
+			if err != nil {
+				logger.Warn(r.ctx, "Failed to resolve instance metadata; using unweighted addresses: service=%s, error=%v", r.getServiceName(), err)
+			} else {
+				resolvedAddresses = enriched
+			}
+		}
+	}
+	r.updateResolverState(resolvedAddresses)
+}
+
+func resolverAddressesFromStrings(addresses []string) []resolver.Address {
+	resolved := make([]resolver.Address, 0, len(addresses))
+	for _, address := range addresses {
+		resolved = append(resolved, resolver.Address{Addr: address})
+	}
+	return resolved
+}
+
+func (r *serviceResolver) updateResolverState(addresses []resolver.Address) {
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
 	if r.closed || r.ctx == nil || r.ctx.Err() != nil {
@@ -276,15 +305,8 @@ func (r *serviceResolver) updateState(addresses []string) {
 		return
 	}
 
-	addrs := make([]resolver.Address, 0, len(addresses))
-	for _, addr := range addresses {
-		addrs = append(addrs, resolver.Address{
-			Addr: addr,
-		})
-	}
-
 	state := resolver.State{
-		Addresses: addrs,
+		Addresses: addresses,
 	}
 
 	if err := r.cc.UpdateState(state); err != nil {

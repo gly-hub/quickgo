@@ -7,8 +7,41 @@ import (
 	"testing"
 	"time"
 
+	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc/resolver"
 )
+
+func TestServicePrefixSeparatesSiblingServiceNames(t *testing.T) {
+	if got, want := servicePrefix("/grpc/services", "orders"), "/grpc/services/orders/"; got != want {
+		t.Fatalf("servicePrefix() = %q, want %q", got, want)
+	}
+}
+
+func TestServiceWatchStartsAfterSnapshotRevision(t *testing.T) {
+	op := clientv3.OpGet("/grpc/services/orders/", serviceWatchOptions(41)...)
+	if got, want := op.Rev(), int64(42); got != want {
+		t.Fatalf("watch revision = %d, want %d", got, want)
+	}
+}
+
+func TestResolverAddressesReadInstanceWeight(t *testing.T) {
+	resp := &clientv3.GetResponse{Kvs: []*mvccpb.KeyValue{
+		{Key: []byte("/grpc/services/orders/127.0.0.1:9001"), Value: []byte(`{"weight":"3"}`)},
+		{Key: []byte("/grpc/services/orders/127.0.0.1:9002"), Value: []byte("127.0.0.1:9002")},
+	}}
+
+	addresses := resolverAddresses(resp)
+	if len(addresses) != 2 {
+		t.Fatalf("expected two resolver addresses, got %d", len(addresses))
+	}
+	if got := weightFromAddress(addresses[0]); got != 3 {
+		t.Fatalf("expected configured weight 3, got %d", got)
+	}
+	if got := weightFromAddress(addresses[1]); got != 1 {
+		t.Fatalf("expected default weight 1, got %d", got)
+	}
+}
 
 type closeCountingDiscovery struct {
 	key    string
