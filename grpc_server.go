@@ -47,6 +47,8 @@ type GrpcServerConfig struct {
 	KeepAliveTimeout string `json:"keepAliveTimeout" yaml:"keepAliveTimeout" toml:"keepAliveTimeout"`
 	// Etcd 配置（使用 etcd 服务发现时必需，全局共享）
 	Etcd *EtcdConfig `json:"etcd" yaml:"etcd" toml:"etcd"`
+	// 注册实例元数据（例如 version、weight、region）。仅在使用 etcd 注册时写入。
+	Metadata map[string]string `json:"metadata" yaml:"metadata" toml:"metadata"`
 	// Metrics 配置（可选）
 	Metrics *metrics.Config `json:"metrics" yaml:"metrics" toml:"metrics"`
 
@@ -188,14 +190,8 @@ func (s *GrpcServer) Start() error {
 		return s.rollbackStartedServer(fmt.Errorf("failed to create etcd registry: %w", err))
 	}
 
-	metadata := map[string]string{
-		"version": "1.0.0",
-		"weight":  "10",
-		"region":  "default",
-	}
-
 	// 使用包含端口的完整地址创建新的 registrar
-	s.registrar = grpc.NewServiceRegistrar(registry, s.config.ServiceName, serverAddress, metadata)
+	s.registrar = grpc.NewServiceRegistrar(registry, s.config.ServiceName, serverAddress, s.config.Metadata)
 
 	if err := s.registrar.Register(context.Background()); err != nil {
 		return s.rollbackStartedServer(fmt.Errorf("failed to register service to etcd: %w", err))
@@ -309,6 +305,12 @@ func cloneGrpcServerConfig(config *GrpcServerConfig) *GrpcServerConfig {
 		etcd := *config.Etcd
 		etcd.Endpoints = append([]string(nil), config.Etcd.Endpoints...)
 		cloned.Etcd = &etcd
+	}
+	if config.Metadata != nil {
+		cloned.Metadata = make(map[string]string, len(config.Metadata))
+		for key, value := range config.Metadata {
+			cloned.Metadata[key] = value
+		}
 	}
 	if config.Metrics != nil {
 		metricsConfig := *config.Metrics

@@ -21,6 +21,7 @@ grpcClient:
   staticAddresses:
     user-service: "127.0.0.1:9001"
   timeout: "10s"
+  waitForReady: true
   keepAliveTime: "30s"
   keepAliveTimeout: "10s"
   poolSize: 2

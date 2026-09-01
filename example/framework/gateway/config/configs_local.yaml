@@ -12,6 +12,7 @@ logger:
 
 grpcClient:
   timeout: "10s"
+	waitForReady: true
   insecure: true
   keepAliveTime: "10s"
   keepAliveTimeout: "3s"

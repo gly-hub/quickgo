@@ -128,3 +128,18 @@ func TestGrpcServerClonesMetricsConfig(t *testing.T) {
 		t.Fatal("expected metrics buckets to be cloned")
 	}
 }
+
+func TestNewGrpcServerClonesRegistrationMetadata(t *testing.T) {
+	config := &GrpcServerConfig{
+		Metadata: map[string]string{"weight": "3"},
+	}
+	server, err := NewGrpcServer(config)
+	if err != nil {
+		t.Fatalf("NewGrpcServer failed: %v", err)
+	}
+
+	config.Metadata["weight"] = "9"
+	if got := server.config.Metadata["weight"]; got != "3" {
+		t.Fatalf("expected registration metadata to be cloned, got %q", got)
+	}
+}

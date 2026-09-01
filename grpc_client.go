@@ -24,8 +24,10 @@ type GrpcClientConfig struct {
 	// 静态服务地址映射（discovery=static 时使用）
 	// 格式：服务名 -> 地址（如 "user-service": "127.0.0.1:9001"）
 	StaticAddresses map[string]string `json:"staticAddresses" yaml:"staticAddresses" toml:"staticAddresses"`
-	// 连接超时时间 示例：10s
+	// 连接超时时间；启用 waitForReady 且调用方未设置 deadline 时，也作为一元 RPC 的最大等待时间。示例：10s
 	Timeout string `json:"timeout" yaml:"timeout" toml:"timeout"`
+	// 一元 RPC 在服务暂不可用时等待连接恢复；没有调用方 deadline 时，最多等待 Timeout。
+	WaitForReady bool `json:"waitForReady" yaml:"waitForReady" toml:"waitForReady"`
 	// 是否使用非安全连接（不加密）
 	Insecure bool `json:"insecure" yaml:"insecure" toml:"insecure"`
 	// TLS 配置。Insecure=false 时必须提供，支持系统 CA、自定义 CA 和双向 TLS。
@@ -352,6 +354,7 @@ func (m *GrpcClientManager) createClient(serviceName string) (*grpc.Client, erro
 	clientConfig := grpc.ClientConfig{
 		Address:           address, // 使用解析后的地址
 		Timeout:           timeout,
+		WaitForReady:      config.WaitForReady,
 		Insecure:          config.Insecure,
 		TLS:               clientTLSConfig(config.TLS),
 		ReconnectInterval: m.reconnectInterval,
@@ -834,10 +837,11 @@ func NewGrpcClient(serviceName string, config *GrpcClientConfig) (*GrpcClient, e
 	}
 
 	clientConfig := grpc.ClientConfig{
-		Address:  address,
-		Timeout:  timeout,
-		Insecure: config.Insecure,
-		TLS:      clientTLSConfig(config.TLS),
+		Address:      address,
+		Timeout:      timeout,
+		WaitForReady: config.WaitForReady,
+		Insecure:     config.Insecure,
+		TLS:          clientTLSConfig(config.TLS),
 	}
 
 	// 设置 KeepAlive 配置
