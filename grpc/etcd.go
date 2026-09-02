@@ -243,6 +243,7 @@ func (r *EtcdResolver) watch(ctx context.Context, serviceName string, callback f
 	watchChan := client.Watch(watchCtx, key, serviceWatchOptions(watchRevision)...)
 	done := make(chan error, 1)
 	watchLoop := func() {
+		defer cancel()
 		defer cleanup()
 		for {
 			select {
@@ -286,12 +287,50 @@ func (r *EtcdResolver) watch(ctx context.Context, serviceName string, callback f
 		if err := func() error {
 			watchLoop()
 			return <-done
-		}(); err != nil && ctx.Err() == nil {
-			logger.Warn(context.Background(), "Etcd watch ended: service=%s, error=%v", serviceName, err)
+		}(); err != nil && ctx.Err() == nil && r.isOpen() {
+			logger.Warn(context.Background(), "Etcd watch ended; restarting: service=%s, error=%v", serviceName, err)
+			retryEtcdWatch(ctx, r.isOpen, etcdRecoveryInitialBackoff, etcdRecoveryMaxBackoff, func() error {
+				return r.watchUntilDone(ctx, serviceName, callback)
+			}, func(retryErr error) {
+				logger.Warn(context.Background(), "Etcd watch restart failed; retrying: service=%s, error=%v", serviceName, retryErr)
+			})
 		}
 	}()
 
 	return nil
+}
+
+func (r *EtcdResolver) isOpen() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return !r.closed && r.client != nil
+}
+
+func retryEtcdWatch(ctx context.Context, shouldContinue func() bool, initialBackoff, maxBackoff time.Duration, run func() error, onError func(error)) {
+	backoff := initialBackoff
+	for {
+		if ctx.Err() != nil || !shouldContinue() {
+			return
+		}
+
+		err := run()
+		if ctx.Err() != nil || !shouldContinue() {
+			return
+		}
+		if err == nil {
+			err = errors.New("etcd watch ended unexpectedly")
+		}
+		onError(err)
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 func serviceWatchOptions(revision int64) []clientv3.OpOption {

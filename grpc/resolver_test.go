@@ -43,6 +43,48 @@ func TestResolverAddressesReadInstanceWeight(t *testing.T) {
 	}
 }
 
+func TestRetryEtcdWatchRestartsAfterTermination(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls int
+	var mu sync.Mutex
+	restarted := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		retryEtcdWatch(ctx, func() bool { return true }, time.Millisecond, time.Millisecond, func() error {
+			mu.Lock()
+			calls++
+			call := calls
+			mu.Unlock()
+			if call == 1 {
+				return errors.New("watch terminated")
+			}
+			close(restarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}, func(error) {})
+	}()
+
+	select {
+	case <-restarted:
+	case <-time.After(time.Second):
+		t.Fatal("watch was not restarted")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watch retry loop did not stop after cancellation")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("watch attempts = %d, want 2", calls)
+	}
+}
+
 type closeCountingDiscovery struct {
 	key    string
 	closed int
