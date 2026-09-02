@@ -3,11 +3,13 @@ package grpc
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/base"
+	"google.golang.org/grpc/resolver"
 
 	"github.com/gly-hub/quickgo/logger"
 )
@@ -39,13 +41,17 @@ type WeightedAddress struct {
 	Weight  int // 权重，默认为 1
 }
 
-// weightedRoundRobinBuilder 加权轮询构建器（简化实现，使用轮询策略）
+const (
+	serviceWeightAttributeKey = "quickgo.service.weight"
+	maxServiceWeight          = 1000
+)
+
+// weightedRoundRobinBuilder 加权轮询构建器。
 type weightedRoundRobinBuilder struct{}
 
 // Build 构建负载均衡器
 func (b *weightedRoundRobinBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
-	// 使用 base 包构建轮询负载均衡器
-	return base.NewBalancerBuilder(WeightedRoundRobinBalancer, &roundRobinPickerBuilder{}, base.Config{
+	return base.NewBalancerBuilder(WeightedRoundRobinBalancer, &weightedRoundRobinPickerBuilder{}, base.Config{
 		HealthCheck: true,
 	}).Build(cc, opts)
 }
@@ -55,51 +61,91 @@ func (b *weightedRoundRobinBuilder) Name() string {
 	return WeightedRoundRobinBalancer
 }
 
-// roundRobinPickerBuilder 轮询选择器构建器
-type roundRobinPickerBuilder struct{}
+// weightedRoundRobinPickerBuilder constructs a smooth weighted round-robin picker.
+type weightedRoundRobinPickerBuilder struct{}
 
 // Build 构建选择器
-func (b *roundRobinPickerBuilder) Build(info base.PickerBuildInfo) balancer.Picker {
+func (b *weightedRoundRobinPickerBuilder) Build(info base.PickerBuildInfo) balancer.Picker {
 	if len(info.ReadySCs) == 0 {
 		return base.NewErrPicker(balancer.ErrNoSubConnAvailable)
 	}
 
-	// 构建轮询选择器
-	scs := make([]balancer.SubConn, 0, len(info.ReadySCs))
-	for sc := range info.ReadySCs {
-		scs = append(scs, sc)
+	subConns := make([]weightedSubConn, 0, len(info.ReadySCs))
+	for sc, subConnInfo := range info.ReadySCs {
+		subConns = append(subConns, weightedSubConn{
+			subConn: sc,
+			weight:  weightFromAddress(subConnInfo.Address),
+			address: subConnInfo.Address.Addr,
+		})
 	}
+	// Map iteration is intentionally random; stabilize it so equal-weight
+	// instances have predictable scheduling across picker rebuilds.
+	sort.Slice(subConns, func(i, j int) bool { return subConns[i].address < subConns[j].address })
 
-	// 使用简单的轮询选择器
-	return &roundRobinPicker{
-		subConns: scs,
-		next:     0,
-		mu:       sync.Mutex{},
-	}
+	return &weightedRoundRobinPicker{subConns: subConns}
 }
 
-// roundRobinPicker 轮询选择器
-type roundRobinPicker struct {
-	subConns []balancer.SubConn
-	next     int
+func weightFromAddress(address resolver.Address) int {
+	if address.Attributes == nil {
+		return 1
+	}
+	weight, ok := address.Attributes.Value(serviceWeightAttributeKey).(int)
+	if !ok || weight <= 0 {
+		return 1
+	}
+	if weight > maxServiceWeight {
+		return maxServiceWeight
+	}
+	return weight
+}
+
+type weightedSubConn struct {
+	subConn       balancer.SubConn
+	address       string
+	weight        int
+	currentWeight int
+}
+
+// weightedRoundRobinPicker uses the smooth weighted round-robin algorithm.
+// It does not expand an instance into N entries, so untrusted weight values do
+// not create an unbounded picker allocation.
+type weightedRoundRobinPicker struct {
+	subConns []weightedSubConn
 	mu       sync.Mutex
 }
 
 // Pick 选择连接
-func (p *roundRobinPicker) Pick(info balancer.PickInfo) (balancer.PickResult, error) {
+func (p *weightedRoundRobinPicker) Pick(info balancer.PickInfo) (balancer.PickResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if len(p.subConns) == 0 {
+	selected := p.pickNext()
+	if selected == nil {
 		return balancer.PickResult{}, fmt.Errorf("no subconnections available")
 	}
 
-	sc := p.subConns[p.next]
-	p.next = (p.next + 1) % len(p.subConns)
-
 	return balancer.PickResult{
-		SubConn: sc,
+		SubConn: selected.subConn,
 	}, nil
+}
+
+func (p *weightedRoundRobinPicker) pickNext() *weightedSubConn {
+	if len(p.subConns) == 0 {
+		return nil
+	}
+
+	var selected *weightedSubConn
+	totalWeight := 0
+	for i := range p.subConns {
+		candidate := &p.subConns[i]
+		candidate.currentWeight += candidate.weight
+		totalWeight += candidate.weight
+		if selected == nil || candidate.currentWeight > selected.currentWeight {
+			selected = candidate
+		}
+	}
+	selected.currentWeight -= totalWeight
+	return selected
 }
 
 // RegisterWeightedRoundRobinBalancer 注册加权轮询负载均衡器

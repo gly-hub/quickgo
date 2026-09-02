@@ -38,12 +38,13 @@ type Client struct {
 // ClientConfig 客户端配置
 type ClientConfig struct {
 	Address           string              // 服务器地址，格式：host:port 或 scheme://service-name（使用服务发现时）
-	Timeout           time.Duration       // 连接超时时间
+	Timeout           time.Duration       // 连接超时时间；WaitForReady 时也是无 deadline 一元 RPC 的最大等待时间
 	Insecure          bool                // 是否使用非安全连接（不加密）
 	TLS               *TLSConfig          // TLS配置（如果 Insecure=false）
 	Options           []grpc.DialOption   // 自定义 DialOption
 	KeepAlive         *KeepAliveConfig    // KeepAlive配置
 	ReconnectInterval time.Duration       // 重连退避的基础延迟；0 使用 gRPC 默认值
+	WaitForReady      bool                // 一元 RPC 在连接恢复前等待，直到 context deadline
 	ServiceDiscovery  ServiceDiscovery    // 服务发现（可选）
 	LoadBalancing     LoadBalancingPolicy // 负载均衡策略
 }
@@ -176,6 +177,9 @@ func NewClient(config ClientConfig) (*Client, error) {
 		unaryInterceptors = append([]grpc.UnaryClientInterceptor{tracing.UnaryClientInterceptor()}, unaryInterceptors...)
 		streamInterceptors = append([]grpc.StreamClientInterceptor{tracing.StreamClientInterceptor()}, streamInterceptors...)
 	}
+	if config.WaitForReady {
+		unaryInterceptors = append(unaryInterceptors, waitForReadyUnaryInterceptor(config.Timeout))
+	}
 
 	// 添加默认拦截器（日志、链路追踪）
 	options = append(options, grpc.WithChainUnaryInterceptor(unaryInterceptors...))
@@ -198,6 +202,17 @@ func NewClient(config ClientConfig) (*Client, error) {
 	client.options = options
 
 	return client, nil
+}
+
+func waitForReadyUnaryInterceptor(timeout time.Duration) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline && timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		return invoker(ctx, method, req, reply, cc, append(opts, grpc.WaitForReady(true))...)
+	}
 }
 
 func loadClientTLSCredentials(config *TLSConfig) (credentials.TransportCredentials, error) {
@@ -392,6 +407,10 @@ func (c *Client) HealthCheck(ctx context.Context, service string) (*grpc_health_
 	if err != nil {
 		logger.Error(ctx, "Health check failed: service=%s, address=%s, error=%v", service, c.address, err)
 		return nil, fmt.Errorf("health check failed: %w", err)
+	}
+	if resp.Status != grpc_health_v1.HealthCheckResponse_SERVING {
+		logger.Warn(ctx, "Health check reported non-serving status: service=%s, address=%s, status=%s", service, c.address, resp.Status)
+		return resp, fmt.Errorf("health check is not serving: service=%s, status=%s", service, resp.Status)
 	}
 
 	return resp, nil

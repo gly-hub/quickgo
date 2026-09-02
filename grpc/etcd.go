@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc/attributes"
+	grpcresolver "google.golang.org/grpc/resolver"
 
 	"github.com/gly-hub/quickgo/logger"
 )
@@ -92,8 +95,34 @@ func (r *EtcdResolver) DiscoveryKey() string {
 
 // Resolve 解析服务地址
 func (r *EtcdResolver) Resolve(ctx context.Context, serviceName string) ([]string, error) {
-	key := path.Join(r.prefix, serviceName)
+	resp, err := r.getServiceInstances(ctx, serviceName)
+	if err != nil {
+		return nil, err
+	}
+	addresses := serviceAddresses(resp)
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("%w for service: %s", errNoServiceAddresses, serviceName)
+	}
+	return addresses, nil
+}
 
+// ResolveResolverAddresses returns gRPC addresses enriched with the instance
+// metadata stored by EtcdRegistry. It is intentionally additive to preserve
+// the public ServiceDiscovery interface for custom resolvers.
+func (r *EtcdResolver) ResolveResolverAddresses(ctx context.Context, serviceName string) ([]grpcresolver.Address, error) {
+	resp, err := r.getServiceInstances(ctx, serviceName)
+	if err != nil {
+		return nil, err
+	}
+
+	addresses := resolverAddresses(resp)
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("%w for service: %s", errNoServiceAddresses, serviceName)
+	}
+	return addresses, nil
+}
+
+func (r *EtcdResolver) getServiceInstances(ctx context.Context, serviceName string) (*clientv3.GetResponse, error) {
 	r.mu.RLock()
 	client := r.client
 	closed := r.closed
@@ -102,32 +131,56 @@ func (r *EtcdResolver) Resolve(ctx context.Context, serviceName string) ([]strin
 		return nil, fmt.Errorf("etcd resolver is closed")
 	}
 
-	resp, err := client.Get(ctx, key, clientv3.WithPrefix())
+	resp, err := client.Get(ctx, servicePrefix(r.prefix, serviceName), clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get service from etcd: %w", err)
 	}
+	return resp, nil
+}
 
+func servicePrefix(prefix, serviceName string) string {
+	// The trailing slash prevents a lookup for "orders" from returning
+	// instances registered under sibling names such as "orders-canary".
+	return path.Join(prefix, serviceName) + "/"
+}
+
+func serviceAddresses(resp *clientv3.GetResponse) []string {
 	addresses := make([]string, 0, len(resp.Kvs))
-	seen := make(map[string]bool)
-
+	seen := make(map[string]struct{}, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
-		// 从 key 中提取地址，格式：/prefix/service-name/address
-		keyStr := string(kv.Key)
-		parts := strings.Split(keyStr, "/")
-		if len(parts) > 0 {
-			addr := parts[len(parts)-1]
-			if !seen[addr] {
-				addresses = append(addresses, addr)
-				seen[addr] = true
+		address := path.Base(string(kv.Key))
+		if _, ok := seen[address]; ok {
+			continue
+		}
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+	if len(addresses) == 0 {
+		return nil
+	}
+	return addresses
+}
+
+func resolverAddresses(resp *clientv3.GetResponse) []grpcresolver.Address {
+	addresses := make([]grpcresolver.Address, 0, len(resp.Kvs))
+	seen := make(map[string]struct{}, len(resp.Kvs))
+	for _, kv := range resp.Kvs {
+		address := path.Base(string(kv.Key))
+		if _, ok := seen[address]; ok {
+			continue
+		}
+		seen[address] = struct{}{}
+
+		resolved := grpcresolver.Address{Addr: address}
+		metadata := make(map[string]string)
+		if err := json.Unmarshal(kv.Value, &metadata); err == nil {
+			if weight, err := strconv.Atoi(metadata["weight"]); err == nil && weight > 0 {
+				resolved.Attributes = attributes.New(serviceWeightAttributeKey, weight)
 			}
 		}
+		addresses = append(addresses, resolved)
 	}
-
-	if len(addresses) == 0 {
-		return nil, fmt.Errorf("%w for service: %s", errNoServiceAddresses, serviceName)
-	}
-
-	return addresses, nil
+	return addresses
 }
 
 // Watch 监听服务变化
@@ -147,7 +200,7 @@ func (r *EtcdResolver) watch(ctx context.Context, serviceName string, callback f
 		return fmt.Errorf("etcd watch callback is nil")
 	}
 
-	key := path.Join(r.prefix, serviceName)
+	key := servicePrefix(r.prefix, serviceName)
 
 	r.mu.Lock()
 	if r.closed || r.client == nil {
@@ -166,22 +219,31 @@ func (r *EtcdResolver) watch(ctx context.Context, serviceName string, callback f
 		r.mu.Unlock()
 	}
 
-	// 首次获取
-	addresses, err := r.Resolve(watchCtx, serviceName)
+	// Read a snapshot and begin watching at its next revision. This closes the
+	// otherwise lossy window between Get and Watch.
+	resp, err := r.getServiceInstances(watchCtx, serviceName)
 	if err != nil {
-		if !wait || !errors.Is(err, errNoServiceAddresses) {
-			cancel()
-			cleanup()
-			return err
-		}
-		addresses = nil
+		cancel()
+		cleanup()
+		return err
+	}
+	addresses := serviceAddresses(resp)
+	if len(addresses) == 0 && !wait {
+		cancel()
+		cleanup()
+		return fmt.Errorf("%w for service: %s", errNoServiceAddresses, serviceName)
 	}
 	callback(addresses)
 
 	// 监听变化
-	watchChan := client.Watch(watchCtx, key, clientv3.WithPrefix())
+	watchRevision := int64(0)
+	if resp != nil && resp.Header != nil {
+		watchRevision = resp.Header.Revision
+	}
+	watchChan := client.Watch(watchCtx, key, serviceWatchOptions(watchRevision)...)
 	done := make(chan error, 1)
 	watchLoop := func() {
+		defer cancel()
 		defer cleanup()
 		for {
 			select {
@@ -225,12 +287,58 @@ func (r *EtcdResolver) watch(ctx context.Context, serviceName string, callback f
 		if err := func() error {
 			watchLoop()
 			return <-done
-		}(); err != nil && ctx.Err() == nil {
-			logger.Warn(context.Background(), "Etcd watch ended: service=%s, error=%v", serviceName, err)
+		}(); err != nil && ctx.Err() == nil && r.isOpen() {
+			logger.Warn(context.Background(), "Etcd watch ended; restarting: service=%s, error=%v", serviceName, err)
+			retryEtcdWatch(ctx, r.isOpen, etcdRecoveryInitialBackoff, etcdRecoveryMaxBackoff, func() error {
+				return r.watchUntilDone(ctx, serviceName, callback)
+			}, func(retryErr error) {
+				logger.Warn(context.Background(), "Etcd watch restart failed; retrying: service=%s, error=%v", serviceName, retryErr)
+			})
 		}
 	}()
 
 	return nil
+}
+
+func (r *EtcdResolver) isOpen() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return !r.closed && r.client != nil
+}
+
+func retryEtcdWatch(ctx context.Context, shouldContinue func() bool, initialBackoff, maxBackoff time.Duration, run func() error, onError func(error)) {
+	backoff := initialBackoff
+	for {
+		if ctx.Err() != nil || !shouldContinue() {
+			return
+		}
+
+		err := run()
+		if ctx.Err() != nil || !shouldContinue() {
+			return
+		}
+		if err == nil {
+			err = errors.New("etcd watch ended unexpectedly")
+		}
+		onError(err)
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+func serviceWatchOptions(revision int64) []clientv3.OpOption {
+	options := []clientv3.OpOption{clientv3.WithPrefix()}
+	if revision > 0 {
+		options = append(options, clientv3.WithRev(revision+1))
+	}
+	return options
 }
 
 // Close 关闭服务发现
