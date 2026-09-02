@@ -41,7 +41,10 @@ type WeightedAddress struct {
 	Weight  int // 权重，默认为 1
 }
 
-const serviceWeightAttributeKey = "quickgo.service.weight"
+const (
+	serviceWeightAttributeKey = "quickgo.service.weight"
+	maxServiceWeight          = 1000
+)
 
 // weightedRoundRobinBuilder 加权轮询构建器。
 type weightedRoundRobinBuilder struct{}
@@ -89,6 +92,9 @@ func weightFromAddress(address resolver.Address) int {
 	weight, ok := address.Attributes.Value(serviceWeightAttributeKey).(int)
 	if !ok || weight <= 0 {
 		return 1
+	}
+	if weight > maxServiceWeight {
+		return maxServiceWeight
 	}
 	return weight
 }

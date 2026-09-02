@@ -17,6 +17,9 @@ func TestWeightFromAddress(t *testing.T) {
 	if got := weightFromAddress(resolver.Address{Attributes: attributes.New(serviceWeightAttributeKey, 0)}); got != 1 {
 		t.Fatalf("invalid weight = %d, want 1", got)
 	}
+	if got := weightFromAddress(resolver.Address{Attributes: attributes.New(serviceWeightAttributeKey, maxServiceWeight+1)}); got != maxServiceWeight {
+		t.Fatalf("oversized weight = %d, want %d", got, maxServiceWeight)
+	}
 }
 
 func TestWeightedRoundRobinPickerHonorsInstanceWeights(t *testing.T) {

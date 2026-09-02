@@ -408,6 +408,10 @@ func (c *Client) HealthCheck(ctx context.Context, service string) (*grpc_health_
 		logger.Error(ctx, "Health check failed: service=%s, address=%s, error=%v", service, c.address, err)
 		return nil, fmt.Errorf("health check failed: %w", err)
 	}
+	if resp.Status != grpc_health_v1.HealthCheckResponse_SERVING {
+		logger.Warn(ctx, "Health check reported non-serving status: service=%s, address=%s, status=%s", service, c.address, resp.Status)
+		return resp, fmt.Errorf("health check is not serving: service=%s, status=%s", service, resp.Status)
+	}
 
 	return resp, nil
 }
