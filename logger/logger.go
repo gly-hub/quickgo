@@ -24,6 +24,9 @@ var (
 	knownLoggerFrames = 4
 	formatVerbPattern = regexp.MustCompile(`%(?:\[[0-9]+\])?[-+#0 ]*(?:\*|\[[0-9]+\]\*)?(?:\.(?:\*|\[[0-9]+\]\*))?[bcdefgGopqstTUvVxX%]`)
 	frameworkPackages = []string{
+		// QuickGo's adapters (for example db/gorm) forward logs through this
+		// package. Keep walking until the application's call site.
+		"github.com/gly-hub/quickgo",
 		"google.golang.org/grpc",
 		"github.com/spf13/cobra",
 		"go.opentelemetry.io",
@@ -601,21 +604,24 @@ func getCaller() (uintptr, string, int) {
 			continue
 		}
 
-		// Check if this is a framework package
-		isFramework := false
-		for _, frameworkPkg := range frameworkPackages {
-			if strings.Contains(pkg, frameworkPkg) || strings.Contains(f.File, frameworkPkg) {
-				isFramework = true
-				break
-			}
-		}
-
 		// If the caller isn't part of framework packages, we're done
-		if !isFramework {
+		if !isFrameworkFrame(pkg, f.File) {
 			return f.PC, f.File, f.Line
 		}
 	}
 
 	// if we got here, we failed to find the caller's context
 	return 0, "", 0
+}
+
+// isFrameworkFrame reports whether a stack frame belongs to a configured
+// framework package or to a framework package's subpackage. File matching is
+// retained for module-cache paths, which include the import path in the path.
+func isFrameworkFrame(pkg, file string) bool {
+	for _, frameworkPkg := range frameworkPackages {
+		if pkg == frameworkPkg || strings.HasPrefix(pkg, frameworkPkg+"/") || strings.Contains(file, frameworkPkg) {
+			return true
+		}
+	}
+	return false
 }

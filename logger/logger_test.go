@@ -524,6 +524,15 @@ func TestCallerDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestFrameworkFrameMatchesQuickGoSubpackages(t *testing.T) {
+	if !isFrameworkFrame("github.com/gly-hub/quickgo/db/gorm", "") {
+		t.Fatal("expected QuickGo subpackage to be treated as a framework frame")
+	}
+	if isFrameworkFrame("github.com/gly-hub/quickgo-app/db", "") {
+		t.Fatal("did not expect similarly named package to be treated as a framework frame")
+	}
+}
+
 func BenchmarkDebugFiltered(b *testing.B) {
 	logger, err := NewLogger(Config{Level: LevelInfo})
 	if err != nil {
