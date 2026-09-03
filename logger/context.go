@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 type contextKey string
@@ -36,6 +38,9 @@ func GetTraceID(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
+	if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
+		return spanContext.TraceID().String()
+	}
 	if traceID, ok := ctx.Value(traceIDKey).(string); ok {
 		return traceID
 	}
@@ -46,6 +51,9 @@ func GetTraceID(ctx context.Context) string {
 func GetSpanID(ctx context.Context) string {
 	if ctx == nil {
 		return ""
+	}
+	if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
+		return spanContext.SpanID().String()
 	}
 	if spanID, ok := ctx.Value(spanIDKey).(string); ok {
 		return spanID

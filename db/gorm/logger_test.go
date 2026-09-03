@@ -10,6 +10,7 @@ import (
 	"time"
 
 	frameworkLogger "github.com/gly-hub/quickgo/logger"
+	"github.com/gly-hub/quickgo/tracing"
 	"gorm.io/gorm/logger"
 )
 
@@ -47,3 +48,23 @@ func TestTraceCallerResolvesPastQuickGoAdapter(t *testing.T) {
 }
 
 var _ logger.Interface = (*gormLogger)(nil)
+
+func TestTraceRunsWhenSQLLoggingIsDisabledAndTracingIsEnabled(t *testing.T) {
+	if err := tracing.Init(&tracing.Config{Enabled: true}); err != nil {
+		t.Fatalf("initialize tracing: %v", err)
+	}
+	defer tracing.Shutdown(context.Background())
+
+	adapter := newLogger(&GormConfig{EnableLog: false})
+	if _, ok := adapter.(*gormLogger); !ok {
+		t.Fatalf("adapter = %T, want *gormLogger", adapter)
+	}
+	called := false
+	adapter.Trace(context.Background(), time.Now(), func() (string, int64) {
+		called = true
+		return "SELECT 1", 1
+	}, nil)
+	if !called {
+		t.Fatal("expected tracing path to evaluate the GORM query even when SQL logging is disabled")
+	}
+}

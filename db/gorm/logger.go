@@ -17,25 +17,23 @@ import (
 
 // newLogger 创建 GORM 日志适配器
 func newLogger(config *GormConfig) logger.Interface {
-	if !config.EnableLog {
-		return logger.Default.LogMode(logger.Silent)
-	}
-
 	slowThreshold := time.Duration(config.SlowThreshold) * time.Millisecond
 	if slowThreshold == 0 {
 		slowThreshold = 200 * time.Millisecond // 默认 200ms
 	}
 
-	// 根据配置的日志级别设置
+	// 根据配置的日志级别设置。即使关闭 SQL 日志，也保留适配器以创建 tracing span。
 	var logLevel logger.LogLevel
-	switch config.LogLevel {
-	case "silent":
+	switch {
+	case !config.EnableLog:
 		logLevel = logger.Silent
-	case "error":
+	case config.LogLevel == "silent":
+		logLevel = logger.Silent
+	case config.LogLevel == "error":
 		logLevel = logger.Error
-	case "warn":
+	case config.LogLevel == "warn":
 		logLevel = logger.Warn
-	case "info":
+	case config.LogLevel == "info":
 		logLevel = logger.Info
 	default:
 		logLevel = logger.Info
@@ -95,7 +93,7 @@ func (l *gormLogger) Error(ctx context.Context, msg string, data ...interface{})
 // Trace 实现 logger.Interface.Trace
 // 这是最重要的方法，GORM 的 SQL 查询日志通过这里输出
 func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
-	if l.logLevel <= logger.Silent {
+	if l.logLevel <= logger.Silent && !tracing.IsEnabled() {
 		return
 	}
 

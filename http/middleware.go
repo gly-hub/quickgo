@@ -40,6 +40,11 @@ func TraceMiddleware() fiber.Handler {
 		c.Locals("trace_id", traceID)
 		c.Locals("request_id", traceID)
 		c.Locals("span_id", spanID)
+		ctx := c.UserContext()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		c.SetUserContext(logger.WithTrace(ctx, traceID, spanID))
 
 		// 将 trace ID 添加到响应头中，方便客户端追踪
 		// 统一使用 X-Trace-ID，避免混淆
@@ -55,14 +60,17 @@ func LoggingMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		start := time.Now()
 
-		// 从 Locals 中获取 trace ID 和 span ID，创建 context
-		traceID := GetTraceID(c)
-		spanID := GetSpanID(c)
-		ctx := context.Background()
-		if traceID != "" {
-			ctx = logger.WithTrace(ctx, traceID, spanID)
-		} else {
-			ctx = logger.StartSpan(ctx)
+		ctx := c.UserContext()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if logger.GetTraceID(ctx) == "" {
+			traceID := GetTraceID(c)
+			if traceID == "" {
+				ctx = logger.StartSpan(ctx)
+			} else {
+				ctx = logger.WithTrace(ctx, traceID, GetSpanID(c))
+			}
 		}
 
 		// 处理请求

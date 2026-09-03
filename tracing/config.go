@@ -32,7 +32,8 @@ func DefaultConfig() Config {
 type OTLPConfig struct {
 	// 是否启用 OTLP 上传
 	Enabled bool `json:"enabled" yaml:"enabled" toml:"enabled"`
-	// OTLP 端点（如：http://localhost:4317 或 http://localhost:4318）
+	// OTLP 端点（如：localhost:4318、http://localhost:4318/v1/traces）。
+	// 使用 URL 时，协议和路径以 URL 为准；host:port 则由 Insecure 决定协议。
 	// gRPC 默认端口：4317，HTTP 默认端口：4318
 	Endpoint string `json:"endpoint" yaml:"endpoint" toml:"endpoint"`
 	// 是否使用 gRPC（默认 false，使用 HTTP）

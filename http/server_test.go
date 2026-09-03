@@ -1,12 +1,16 @@
 package http
 
 import (
+	"encoding/json"
 	"net"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gly-hub/quickgo/logger"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -123,6 +127,65 @@ func TestServerZeroConfigEnablesDefaultMiddlewares(t *testing.T) {
 	}
 	if got := resp.Header.Get(TraceIDHeader); got == "" {
 		t.Fatal("expected trace middleware to set trace header")
+	}
+}
+
+func TestTraceMiddlewareStoresCorrelationInUserContext(t *testing.T) {
+	server, err := NewServer(Config{
+		FiberConfig: fiber.Config{DisableStartupMessage: true},
+	})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	server.GetApp().Get("/trace", func(c *fiber.Ctx) error {
+		if got := logger.GetTraceID(c.UserContext()); got != "request-trace" {
+			t.Fatalf("trace ID = %q, want request-trace", got)
+		}
+		if logger.GetSpanID(c.UserContext()) == "" {
+			t.Fatal("expected span ID in user context")
+		}
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	req := httptest.NewRequest("GET", "/trace", nil)
+	req.Header.Set(TraceIDHeader, "request-trace")
+	if _, err := server.GetApp().Test(req); err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+}
+
+func TestLoggingMiddlewareGeneratesCorrelationWhenTraceIsDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	if err := logger.Init(logger.Config{Level: logger.LevelInfo, Output: path}); err != nil {
+		t.Fatalf("initialize logger: %v", err)
+	}
+	defer logger.Close()
+
+	server, err := NewServer(Config{
+		DisableTrace: true,
+		DisableCORS:  true,
+		FiberConfig:  fiber.Config{DisableStartupMessage: true},
+	})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	server.GetApp().Get("/ok", func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+	if _, err := server.GetApp().Test(httptest.NewRequest("GET", "/ok", nil)); err != nil {
+		t.Fatalf("app.Test failed: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read access log: %v", err)
+	}
+	var entry logger.LogEntry
+	if err := json.Unmarshal(content, &entry); err != nil {
+		t.Fatalf("decode access log: %v; content=%s", err, content)
+	}
+	if entry.TraceID == "" || entry.SpanID == "" {
+		t.Fatalf("expected generated correlation IDs, got trace=%q span=%q", entry.TraceID, entry.SpanID)
 	}
 }
 

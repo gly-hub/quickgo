@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TestNewLogger 测试创建日志记录器
@@ -217,6 +219,64 @@ func TestWithFields(t *testing.T) {
 
 	if entry.Message != "test message: action=login" {
 		t.Errorf("Expected message 'test message: action=login', got '%s'", entry.Message)
+	}
+}
+
+func TestLoggerUsesOpenTelemetryCorrelationIDs(t *testing.T) {
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{1},
+		SpanID:     trace.SpanID{2},
+		TraceFlags: trace.FlagsSampled,
+	}))
+	ctx = WithTrace(ctx, "legacy-trace", "legacy-span")
+
+	if got := GetTraceID(ctx); got != "01000000000000000000000000000000" {
+		t.Fatalf("trace ID = %q, want OpenTelemetry trace ID", got)
+	}
+	if got := GetSpanID(ctx); got != "0200000000000000" {
+		t.Fatalf("span ID = %q, want OpenTelemetry span ID", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "logger.json")
+	logger, err := NewLogger(Config{Level: LevelInfo, Output: path})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+	logger.Info(ctx, "test message")
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	var entry LogEntry
+	if err := json.Unmarshal(content, &entry); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if entry.TraceID != "01000000000000000000000000000000" || entry.SpanID != "0200000000000000" {
+		t.Fatalf("unexpected log correlation IDs: trace=%q span=%q", entry.TraceID, entry.SpanID)
+	}
+}
+
+func TestLoggerWritesValidJSONWhenFieldsCannotBeSerialized(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logger.json")
+	logger, err := NewLogger(Config{Level: LevelInfo, Output: path})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.WithField("invalid", make(chan struct{})).Info(context.Background(), "test message")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	var entry LogEntry
+	if err := json.Unmarshal(content, &entry); err != nil {
+		t.Fatalf("expected valid JSON log entry, got %q: %v", content, err)
+	}
+	if entry.Fields["logger_serialization_error"] == "" {
+		t.Fatalf("expected serialization error field, got %#v", entry.Fields)
 	}
 }
 
@@ -581,5 +641,104 @@ func BenchmarkInfoWithCaller(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		logger.Info(context.Background(), "user=%d", i)
+	}
+}
+
+func BenchmarkInfoSyncParallel(b *testing.B) {
+	logger, err := NewLogger(Config{
+		Level:  LevelInfo,
+		Output: os.DevNull,
+	})
+	if err != nil {
+		b.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			logger.Info(ctx, "request completed")
+		}
+	})
+}
+
+func BenchmarkInfoAsyncParallel(b *testing.B) {
+	logger, err := NewLogger(Config{
+		Level:      LevelInfo,
+		Output:     os.DevNull,
+		Async:      true,
+		BufferSize: 4096,
+	})
+	if err != nil {
+		b.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			logger.Info(ctx, "request completed")
+		}
+	})
+	b.StopTimer()
+	if err := logger.Flush(); err != nil {
+		b.Fatalf("Flush failed: %v", err)
+	}
+}
+
+func BenchmarkInfoAsyncWithCallerParallel(b *testing.B) {
+	logger, err := NewLogger(Config{
+		Level:        LevelInfo,
+		Output:       os.DevNull,
+		EnableCaller: true,
+		Async:        true,
+		BufferSize:   4096,
+	})
+	if err != nil {
+		b.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			logger.Info(ctx, "request completed")
+		}
+	})
+	b.StopTimer()
+	if err := logger.Flush(); err != nil {
+		b.Fatalf("Flush failed: %v", err)
+	}
+}
+
+func BenchmarkInfoAsyncParallelFile(b *testing.B) {
+	logger, err := NewLogger(Config{
+		Level:      LevelInfo,
+		Output:     filepath.Join(b.TempDir(), "benchmark.log"),
+		Async:      true,
+		BufferSize: 4096,
+	})
+	if err != nil {
+		b.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			logger.Info(ctx, "request completed")
+		}
+	})
+	b.StopTimer()
+	if err := logger.Flush(); err != nil {
+		b.Fatalf("Flush failed: %v", err)
 	}
 }
