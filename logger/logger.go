@@ -513,12 +513,19 @@ func (l *Logger) writeItem(item logItem) {
 	if item.entry != nil {
 		data, err := json.Marshal(item.entry)
 		if err != nil {
-			item.data = []byte(fmt.Sprintf("[%s] %s: %s\n", item.entry.Level, time.Now().Format(time.RFC3339), item.entry.Message))
+			fallback := *item.entry
+			fallback.Fields = map[string]interface{}{
+				"logger_serialization_error": err.Error(),
+			}
+			data, _ = json.Marshal(fallback)
+			item.data = append(data, '\n')
 		} else {
 			item.data = append(data, '\n')
 		}
 	}
-	_, _ = l.output.Write(item.data)
+	if _, err := l.output.Write(item.data); err != nil && l.output != os.Stderr {
+		_, _ = fmt.Fprintf(os.Stderr, "logger write failed: %v\n", err)
+	}
 }
 
 // getProjectRoot 获取项目根目录

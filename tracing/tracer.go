@@ -3,6 +3,7 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -74,19 +75,27 @@ func Init(config *Config) error {
 	if config.OTLP.Enabled && config.OTLP.Endpoint != "" {
 		var err error
 		// 使用 OTLP Exporter（推荐）
-		// 解析 endpoint，提取 host:port
 		defaultPort := "4318"
 		if config.OTLP.UseGRPC {
 			defaultPort = "4317"
 		}
-		endpoint := parseOTLPEndpoint(config.OTLP.Endpoint, defaultPort)
+		endpoint, err := parseOTLPEndpoint(config.OTLP.Endpoint, defaultPort)
+		if err != nil {
+			return fmt.Errorf("invalid OTLP endpoint %q: %w", config.OTLP.Endpoint, err)
+		}
+		if endpoint.scheme == "https" && config.OTLP.Insecure {
+			return fmt.Errorf("invalid OTLP configuration: endpoint %q uses https but insecure is true", config.OTLP.Endpoint)
+		}
 
 		if config.OTLP.UseGRPC {
 			// 使用 gRPC
-			opts := []otlptracegrpc.Option{
-				otlptracegrpc.WithEndpoint(endpoint),
+			opts := make([]otlptracegrpc.Option, 0, 3)
+			if endpoint.isURL {
+				opts = append(opts, otlptracegrpc.WithEndpointURL(endpoint.value))
+			} else {
+				opts = append(opts, otlptracegrpc.WithEndpoint(endpoint.value))
 			}
-			if config.OTLP.Insecure {
+			if config.OTLP.Insecure && endpoint.scheme == "" {
 				opts = append(opts, otlptracegrpc.WithInsecure())
 			}
 			if len(config.OTLP.Headers) > 0 {
@@ -95,10 +104,13 @@ func Init(config *Config) error {
 			exporter, err = otlptracegrpc.New(context.Background(), opts...)
 		} else {
 			// 使用 HTTP
-			opts := []otlptracehttp.Option{
-				otlptracehttp.WithEndpoint(endpoint),
+			opts := make([]otlptracehttp.Option, 0, 3)
+			if endpoint.isURL {
+				opts = append(opts, otlptracehttp.WithEndpointURL(endpoint.value))
+			} else {
+				opts = append(opts, otlptracehttp.WithEndpoint(endpoint.value))
 			}
-			if config.OTLP.Insecure {
+			if config.OTLP.Insecure && endpoint.scheme == "" {
 				opts = append(opts, otlptracehttp.WithInsecure())
 			}
 			if len(config.OTLP.Headers) > 0 {
@@ -107,13 +119,12 @@ func Init(config *Config) error {
 			exporter, err = otlptracehttp.New(context.Background(), opts...)
 		}
 		if err != nil {
-			return fmt.Errorf("failed to create OTLP exporter (endpoint=%s, parsed=%s): %w", config.OTLP.Endpoint, endpoint, err)
+			return fmt.Errorf("failed to create OTLP exporter (endpoint=%s, parsed=%s): %w", config.OTLP.Endpoint, endpoint.value, err)
 		}
 	} else if config.Jaeger.Enabled {
 		return fmt.Errorf("the Jaeger exporter is no longer supported; configure Jaeger through OTLP")
 	} else {
-		// 如果未启用任何 exporter，使用 Noop Exporter（仅本地追踪，不上传）
-		// 注意：NewNoopExporter 不存在，我们使用 nil 并在后面检查
+		// 未配置 exporter 时仅生成和传播 trace context。
 		exporter = nil
 	}
 
@@ -133,17 +144,17 @@ func Init(config *Config) error {
 	// 创建 TracerProvider
 	var newProvider *tracesdk.TracerProvider
 	if exporter == nil {
-		// 如果没有 exporter，使用 Noop TracerProvider（仅本地追踪，不上传）
+		// 保持 SDK provider，用于生成和传播 trace context，但不导出 span。
 		newProvider = tracesdk.NewTracerProvider(
 			tracesdk.WithResource(res),
-			tracesdk.WithSampler(tracesdk.TraceIDRatioBased(samplingRate)),
+			tracesdk.WithSampler(tracesdk.ParentBased(tracesdk.TraceIDRatioBased(samplingRate))),
 		)
 	} else {
-		// 创建 TracerProvider（带 exporter，会上传到 Jaeger）
+		// 创建 TracerProvider（带 exporter）
 		newProvider = tracesdk.NewTracerProvider(
 			tracesdk.WithBatcher(exporter),
 			tracesdk.WithResource(res),
-			tracesdk.WithSampler(tracesdk.TraceIDRatioBased(samplingRate)),
+			tracesdk.WithSampler(tracesdk.ParentBased(tracesdk.TraceIDRatioBased(samplingRate))),
 		)
 	}
 
@@ -236,38 +247,40 @@ func IsEnabled() bool {
 	return globalTracer != nil && tp != nil
 }
 
-// parseOTLPEndpoint 解析 OTLP endpoint，提取 host:port
-// 支持格式：
-// - http://localhost:4318
-// - https://localhost:4318
-// - localhost:4318
-func parseOTLPEndpoint(endpoint, defaultPort string) string {
-	// 如果包含 scheme，解析 URL
-	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
-		u, err := url.Parse(endpoint)
-		if err != nil {
-			// 如果解析失败，尝试直接提取 host:port
-			return extractHostPort(endpoint)
-		}
-		host := u.Hostname()
-		port := u.Port()
-		if port == "" {
-			port = defaultPort
-		}
-		return host + ":" + port
-	}
-	// 如果没有 scheme，直接返回（应该是 host:port 格式）
-	return endpoint
+type otlpEndpoint struct {
+	value  string
+	scheme string
+	isURL  bool
 }
 
-// extractHostPort 从 URL 字符串中提取 host:port
-func extractHostPort(endpoint string) string {
-	// 移除 http:// 或 https://
-	endpoint = strings.TrimPrefix(endpoint, "http://")
-	endpoint = strings.TrimPrefix(endpoint, "https://")
-	// 移除路径部分
-	if idx := strings.Index(endpoint, "/"); idx != -1 {
-		endpoint = endpoint[:idx]
+// parseOTLPEndpoint accepts either host:port or an http(s) URL. URLs preserve
+// their scheme and path so exporters behind a reverse proxy remain reachable.
+func parseOTLPEndpoint(endpoint, defaultPort string) (otlpEndpoint, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return otlpEndpoint{}, fmt.Errorf("endpoint is empty")
 	}
-	return endpoint
+
+	lowerEndpoint := strings.ToLower(endpoint)
+	if !strings.HasPrefix(lowerEndpoint, "http://") && !strings.HasPrefix(lowerEndpoint, "https://") {
+		if strings.Contains(endpoint, "://") {
+			return otlpEndpoint{}, fmt.Errorf("unsupported URL scheme")
+		}
+		return otlpEndpoint{value: endpoint}, nil
+	}
+
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" {
+		if err != nil {
+			return otlpEndpoint{}, err
+		}
+		return otlpEndpoint{}, fmt.Errorf("URL host is empty")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return otlpEndpoint{}, fmt.Errorf("URL credentials, query, and fragments are not supported")
+	}
+	if u.Port() == "" {
+		u.Host = net.JoinHostPort(u.Hostname(), defaultPort)
+	}
+	return otlpEndpoint{value: u.String(), scheme: u.Scheme, isURL: true}, nil
 }

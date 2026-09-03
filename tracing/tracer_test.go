@@ -40,6 +40,63 @@ func TestDefaultConfigSamplesAll(t *testing.T) {
 	}
 }
 
+func TestParentBasedSamplingHonorsRemoteParentDecision(t *testing.T) {
+	if err := Init(&Config{Enabled: true, SamplingRate: 0.01}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Shutdown(context.Background())
+
+	newRemoteContext := func(flags trace.TraceFlags) context.Context {
+		spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    trace.TraceID{1},
+			SpanID:     trace.SpanID{2},
+			TraceFlags: flags,
+			Remote:     true,
+		})
+		return trace.ContextWithRemoteSpanContext(context.Background(), spanContext)
+	}
+
+	_, sampled := StartSpan(newRemoteContext(trace.FlagsSampled), "sampled-parent")
+	defer sampled.End()
+	if !sampled.IsRecording() {
+		t.Fatal("expected sampled remote parent to remain sampled")
+	}
+
+	_, unsampled := StartSpan(newRemoteContext(0), "unsampled-parent")
+	defer unsampled.End()
+	if unsampled.IsRecording() {
+		t.Fatal("expected unsampled remote parent to remain unsampled")
+	}
+}
+
+func TestParseOTLPEndpointPreservesURLDetails(t *testing.T) {
+	endpoint, err := parseOTLPEndpoint("http://collector.example/v1/traces", "4318")
+	if err != nil {
+		t.Fatalf("parseOTLPEndpoint failed: %v", err)
+	}
+	if !endpoint.isURL || endpoint.scheme != "http" || endpoint.value != "http://collector.example:4318/v1/traces" {
+		t.Fatalf("unexpected endpoint: %#v", endpoint)
+	}
+
+	if _, err := parseOTLPEndpoint("ftp://collector.example", "4318"); err == nil {
+		t.Fatal("expected unsupported scheme to fail")
+	}
+}
+
+func TestInitRejectsConflictingOTLPURLSecurity(t *testing.T) {
+	err := Init(&Config{
+		Enabled: true,
+		OTLP: OTLPConfig{
+			Enabled:  true,
+			Endpoint: "https://collector.example:4318/v1/traces",
+			Insecure: true,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected conflicting endpoint scheme and insecure option to fail")
+	}
+}
+
 type recordingSpan struct {
 	trace.Span
 	ended atomic.Int32
