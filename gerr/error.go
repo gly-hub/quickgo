@@ -383,26 +383,23 @@ func IsRetryable(err error) bool {
 // captureStack 捕获调用堆栈
 func captureStack(skip int) []string {
 	const maxDepth = 10
-	stack := make([]string, 0, maxDepth)
+	pcs := make([]uintptr, maxDepth)
+	n := runtime.Callers(skip, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	stack := make([]string, 0, n)
 
-	for i := skip; i < skip+maxDepth; i++ {
-		pc, file, line, ok := runtime.Caller(i)
-		if !ok {
-			break
-		}
-
-		fn := runtime.FuncForPC(pc)
-		funcName := "unknown"
-		if fn != nil {
-			funcName = fn.Name()
-		}
-
+	for i := 0; i < n; i++ {
+		frame, _ := frames.Next()
+		funcName := frame.Function
 		// 过滤掉 runtime 相关的调用
 		if strings.HasPrefix(funcName, "runtime.") {
 			continue
 		}
 
-		stack = append(stack, fmt.Sprintf("%s:%d %s", file, line, funcName))
+		if funcName == "" {
+			funcName = "unknown"
+		}
+		stack = append(stack, fmt.Sprintf("%s:%d %s", frame.File, frame.Line, funcName))
 	}
 
 	return stack
