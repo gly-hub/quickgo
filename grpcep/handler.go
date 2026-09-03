@@ -2,11 +2,13 @@ package grpcep
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/gly-hub/quickgo/gerr"
@@ -72,9 +74,8 @@ func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interf
 	}
 
 	rpcCxt := h.RPCCtx(ctx)
-	var rets []reflect.Value
 	inParam := []reflect.Value{reflect.ValueOf(rpcCxt), refParam}
-	rets = refHandler.Call(inParam)
+	rets := refHandler.Call(inParam)
 
 	if !rets[1].IsNil() {
 		err := rets[1].Interface().(error)
@@ -82,11 +83,12 @@ func (h *BaseHandler) GRPCCall(ctx *fiber.Ctx, param interface{}, handler interf
 	}
 
 	// 对rpc响应内容进行处理
-	byteData, _ := jsoniter.Marshal(rets[0].Interface())
-	resp := h.ResponseDecorator(byteData, http.GetTraceID(ctx))
+	byteData, err := jsoniter.Marshal(rets[0].Interface())
+	if err != nil {
+		return h.Response(ctx, JsonResponse{}, gerr.Wrap(err, InternalErrCode, InternalErrDesc))
+	}
 	ctx.Response().Header.Add("Content-Type", fiber.MIMEApplicationJSON)
-	_, err := ctx.WriteString(resp)
-	return err
+	return ctx.Send(h.responseDecoratorBytes(byteData, http.GetTraceID(ctx)))
 }
 
 func validateGRPCCallHandler(refParam reflect.Value, refHandler reflect.Value) error {
@@ -204,11 +206,24 @@ func formatSSEMessage(eventID int, content string) string {
 	content = strings.ReplaceAll(content, "\r", "\n")
 
 	var message strings.Builder
-	fmt.Fprintf(&message, "id: %d\n", eventID)
-	for _, line := range strings.Split(content, "\n") {
+	message.Grow(len(content) + strings.Count(content, "\n")*6 + 16)
+	message.WriteString("id: ")
+	message.WriteString(strconv.Itoa(eventID))
+	message.WriteByte('\n')
+	start := 0
+	for {
+		offset := strings.IndexByte(content[start:], '\n')
+		end := len(content)
+		if offset >= 0 {
+			end = start + offset
+		}
 		message.WriteString("data: ")
-		message.WriteString(line)
+		message.WriteString(content[start:end])
 		message.WriteByte('\n')
+		if end == len(content) {
+			break
+		}
+		start = end + 1
 	}
 	message.WriteByte('\n')
 	return message.String()
@@ -253,6 +268,11 @@ func callCloseSend(closeSendMethod reflect.Value) {
 
 func streamContent(response interface{}) string {
 	responseValue := reflect.ValueOf(response)
+	if contentProvider, ok := response.(interface{ GetContent() string }); ok &&
+		responseValue.IsValid() && !isNilReflectValue(responseValue) {
+		return contentProvider.GetContent()
+	}
+
 	if responseValue.IsValid() && !isNilReflectValue(responseValue) {
 		getContent := responseValue.MethodByName("GetContent")
 		if getContent.IsValid() {
@@ -279,6 +299,84 @@ func isNilReflectValue(value reflect.Value) bool {
 }
 
 func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string {
+	return string(h.responseDecoratorBytes(byteData, traceID))
+}
+
+func (h *BaseHandler) responseDecoratorBytes(byteData []byte, traceID string) []byte {
+	if result, ok := responseDecoratorFastPath(byteData, traceID); ok {
+		return result
+	}
+	return h.responseDecoratorBytesLegacy(byteData, traceID)
+}
+
+// responseDecoratorFastPath handles the common protobuf response shape without
+// materializing a map[string]RawMessage. It deliberately only handles the
+// CommonResp variants; all other shapes retain the legacy behavior below.
+func responseDecoratorFastPath(byteData []byte, traceID string) ([]byte, bool) {
+	if !bytes.Contains(byteData, []byte(`"CommonResp"`)) && !bytes.Contains(byteData, []byte(`"common_resp"`)) {
+		return nil, false
+	}
+
+	iter := jsoniter.ParseBytes(jsoniter.ConfigCompatibleWithStandardLibrary, byteData)
+	dataStream := jsoniter.NewStream(jsoniter.ConfigCompatibleWithStandardLibrary, nil, len(byteData))
+	dataStream.WriteObjectStart()
+	firstDataField := true
+	foundCommonResp := false
+	code := int32(SuccessCode)
+	msg := SuccessDesc
+
+	ok := iter.ReadObjectCB(func(iter *jsoniter.Iterator, field string) bool {
+		if field == CommonRespKey || field == CommonRespKeyV2 {
+			foundCommonResp = true
+			commonResp := iter.SkipAndReturnBytes()
+			code, msg = decodeCommonResp(commonResp, code, msg)
+			return true
+		}
+
+		if !firstDataField {
+			dataStream.WriteMore()
+		}
+		dataStream.WriteObjectField(field)
+		value := iter.SkipAndReturnBytes()
+		dataStream.WriteRaw(string(value))
+		firstDataField = false
+		return true
+	})
+	if !ok || iter.Error != nil || !foundCommonResp {
+		return nil, false
+	}
+	dataStream.WriteObjectEnd()
+	dataStream.Flush()
+	if dataStream.Error != nil {
+		return nil, false
+	}
+
+	stream := jsoniter.NewStream(jsoniter.ConfigCompatibleWithStandardLibrary, nil, len(byteData)+64)
+	stream.WriteObjectStart()
+	stream.WriteObjectField("code")
+	stream.WriteInt32(code)
+	stream.WriteMore()
+	stream.WriteObjectField("msg")
+	stream.WriteString(msg)
+	stream.WriteMore()
+	stream.WriteObjectField("data")
+	if firstDataField {
+		stream.WriteNil()
+	} else {
+		stream.WriteRaw(string(dataStream.Buffer()))
+	}
+	stream.WriteMore()
+	stream.WriteObjectField("request_id")
+	stream.WriteString(traceID)
+	stream.WriteObjectEnd()
+	stream.Flush()
+	if stream.Error != nil {
+		return nil, false
+	}
+	return stream.Buffer(), true
+}
+
+func (h *BaseHandler) responseDecoratorBytesLegacy(byteData []byte, traceID string) []byte {
 	// 只解码顶层字段；未处理的 data 保持原始 JSON，避免完整响应二次反序列化。
 	var dataMap map[string]jsoniter.RawMessage
 	var code int32 = SuccessCode
@@ -354,10 +452,10 @@ func (h *BaseHandler) ResponseDecorator(byteData []byte, traceID string) string 
 			RequestId: traceID,
 		}
 		result, _ = jsoniter.Marshal(errorResp)
-		return string(result)
+		return result
 	}
 
-	return string(result)
+	return result
 }
 
 func decodeCommonResp(data jsoniter.RawMessage, defaultCode int32, defaultMsg string) (int32, string) {
@@ -419,6 +517,8 @@ func (h *BaseHandler) RPCCtx(c *fiber.Ctx) context.Context {
 
 	// 2. 只转发明确允许的请求头和 grpc-metadata-* Locals。
 	md, _ := metadata.FromOutgoingContext(ctx)
+	// Own the metadata before adding request headers or Fiber user values.
+	// The tracing path reuses this copy to avoid copying it a second time.
 	md = md.Copy()
 	for _, header := range []string{"authorization", "x-request-id", "x-trace-id"} {
 		if value := c.Get(header); value != "" {
@@ -433,13 +533,10 @@ func (h *BaseHandler) RPCCtx(c *fiber.Ctx) context.Context {
 			}
 		})
 	}
-	if len(md) > 0 {
-		ctx = metadata.NewOutgoingContext(ctx, md)
-	}
-
-	// 4. 注入 OpenTelemetry trace context 到 gRPC metadata
 	if tracing.IsEnabled() {
-		ctx = tracing.InjectTraceContext(ctx)
+		ctx = tracing.InjectTraceContextWithMetadata(ctx, md)
+	} else if len(md) > 0 {
+		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 
 	return ctx

@@ -3,6 +3,7 @@ package grpcep
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/gly-hub/quickgo/gerr"
@@ -162,6 +163,31 @@ func TestResponseDecoratorKeepsRawData(t *testing.T) {
 	}
 	if got := string(response["data"]); got != string(raw) {
 		t.Fatalf("raw data changed: got %s, want %s", got, raw)
+	}
+}
+
+func TestResponseDecoratorFastPathMatchesLegacy(t *testing.T) {
+	handler := &BaseHandler{}
+	cases := []string{
+		`{"CommonResp":{"code":40001,"msg":"invalid"},"payload":{"id":123}}`,
+		`{"common_resp":{"code":200,"msg":"ok"},"payload":[1,2,3]}`,
+		`{"payload":"contains CommonResp as text","ok":true}`,
+		`{"CommonResp":null,"payload":true}`,
+	}
+
+	for _, raw := range cases {
+		got := handler.responseDecoratorBytes([]byte(raw), "trace-1")
+		want := handler.responseDecoratorBytesLegacy([]byte(raw), "trace-1")
+		var gotJSON, wantJSON map[string]json.RawMessage
+		if err := json.Unmarshal(got, &gotJSON); err != nil {
+			t.Fatalf("fast path returned invalid JSON for %s: %v", raw, err)
+		}
+		if err := json.Unmarshal(want, &wantJSON); err != nil {
+			t.Fatalf("legacy path returned invalid JSON for %s: %v", raw, err)
+		}
+		if !reflect.DeepEqual(gotJSON, wantJSON) {
+			t.Fatalf("fast path differs for %s: got %s, want %s", raw, got, want)
+		}
 	}
 }
 

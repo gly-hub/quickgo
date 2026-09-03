@@ -143,6 +143,15 @@ func InjectTraceContext(ctx context.Context) context.Context {
 	} else {
 		md = md.Copy()
 	}
+	return InjectTraceContextWithMetadata(ctx, md)
+}
+
+// InjectTraceContextWithMetadata injects trace context into an owned metadata
+// map. Callers must not reuse or mutate md after passing it here.
+func InjectTraceContextWithMetadata(ctx context.Context, md metadata.MD) context.Context {
+	if md == nil {
+		md = metadata.New(nil)
+	}
 	ctx = metadata.NewOutgoingContext(ctx, md)
 
 	// 使用 OpenTelemetry 的 propagator 注入 trace context
